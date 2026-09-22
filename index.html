@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live Whisper</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#141821;color:#edf0f6}body{max-width:760px;margin:3rem auto;padding:0 1.2rem}h1{margin-bottom:.25rem}p{color:#adb7c8;line-height:1.5}section{background:#202734;border:1px solid #354051;border-radius:12px;padding:1.4rem;margin:1rem 0}label{display:block;margin:.9rem 0 .3rem;font-weight:600}input,select,button{font:inherit;border-radius:7px;padding:.65rem;color:inherit}input,select{box-sizing:border-box;width:100%;background:#131923;border:1px solid #627084}input[type=file]{padding:.4rem}button{background:#4876de;border:0;cursor:pointer;margin:.8rem .4rem 0 0}button:disabled{opacity:.5;cursor:not-allowed}.secondary{background:#394961}#error{color:#ff9c96;white-space:pre-wrap}#status{font-weight:600;color:#9bd8bd}#speed{padding:.8rem;margin:.8rem 0;border-radius:8px;background:#263747;color:#cce3f7;font-weight:600}#speed.warning{background:#483328;color:#ffd1a3}#speed.danger{background:#522c35;color:#ffb7ba}small{color:#adb7c8}
+</style></head><body>
+<h1>Live Whisper</h1><p>Private, local speech-to-text. Transcripts are appended to a file on this computer. The first run downloads the selected model.</p>
+<section><strong id="status">Loading…</strong><div id="details"></div><div id="speed" role="status">Transcription speed: waiting for audio</div><div id="error" role="alert"></div>
+<label for="output">Output text file (absolute path or ~/…)</label><input id="output" type="text" placeholder="~/transcript.txt" autocomplete="off">
+<button id="change" class="secondary">Set / change output</button><small>Changing this during a session sends future lines to the new file.</small>
+<label for="model">Whisper model</label><select id="model"><option>tiny</option><option selected>base</option><option>small</option><option>medium</option><option>large-v3</option></select>
+<button id="stop" class="secondary">Stop transcription</button></section>
+<section><h2>Live audio</h2><p>Choose a system-audio monitor or microphone. On macOS, install and route system audio through BlackHole, then select BlackHole here.</p>
+<label for="source">Audio source</label><select id="source"></select><button id="refresh" class="secondary">Refresh devices</button><button id="start">Start live transcription</button></section>
+<section><h2>Existing recording</h2><p>Choose an audio or video file. Processing happens locally in the background; you do not need to play it.</p>
+<label for="file">Audio / video file</label><input id="file" type="file" accept="audio/*,video/*,.mkv,.webm,.m4a,.mp4,.mov,.wav,.mp3,.ogg,.flac">
+<button id="upload">Upload &amp; transcribe</button><small>Keep this tab open until the upload completes. You can then close it while transcription continues.</small></section>
+<script>
+const $=id=>document.getElementById(id);let busy=false,lastOutput="";
+async function request(url,options={}){const res=await fetch(url,options);const data=await res.json();if(!res.ok)throw Error(data.error||`HTTP ${res.status}`);return data}
+async function post(path,data={}){return request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
+function error(e){$('error').textContent=e?.message||String(e)}
+async function refresh(){try{const data=await request('/api/devices');const selected=$('source').value;$('source').replaceChildren(...data.devices.map(d=>{const o=document.createElement('option');o.value=d.id;o.textContent=d.label;return o}));if(data.devices.some(d=>d.id===selected))$('source').value=selected;if(!data.devices.length)error('No audio devices found. Check FFmpeg / PulseAudio / BlackHole.')}catch(e){error(e)}}
+function showSpeed(s){const panel=$('speed'),speed=s.processing_speed,backlog=s.backlog_seconds||0;panel.className='';if(speed===null||speed===undefined){panel.textContent=['loading','capturing','stopping'].includes(s.state)?`Loading model · ${backlog.toFixed(1)}s buffered; speed available after first speech chunk`:'Transcription speed: waiting for speech';return}let label='Keeping up';if(s.mode==='live'){if(speed<1){label='Falling behind';panel.className='danger'}else if(speed<1.2){label='Near real-time limit';panel.className='warning'}else if(backlog>16){label='Catching up';panel.className='warning'}}else{label='File processing'}panel.textContent=`${label} · ${speed.toFixed(2)}× real time (last 5 speech chunks) · ${backlog.toFixed(1)}s audio waiting`}
+async function status(){try{const s=await request('/api/status');$('status').textContent=(s.state==='capturing'?'Capturing audio · loading model':s.state[0].toUpperCase()+s.state.slice(1))+(s.mode?' · '+s.mode:'');$('details').textContent=`${s.lines} transcript lines · ${Math.floor(s.captured_seconds||0)}s captured · ${(s.captured_seconds||0)>=4?(s.audio_detected?'Audio detected':'No audio detected — check selected source'):'waiting for audio'} · ${s.output||'no output selected'}`;showSpeed(s);if(s.error)error(s.error);if(document.activeElement!==$('output') && s.output && s.output!==lastOutput){$('output').value=s.output;lastOutput=s.output}busy=['uploading','loading','capturing','running','stopping'].includes(s.state);$('start').disabled=$('upload').disabled=busy;$('stop').disabled=!busy;$('change').disabled=s.state==='uploading';}catch(e){error(e)}}
+$('refresh').onclick=refresh;
+$('change').onclick=async()=>{try{$('error').textContent='';await post('/api/output',{output:$('output').value});await status()}catch(e){error(e)}};
+$('start').onclick=async()=>{try{$('error').textContent='';await post('/api/start',{source:$('source').value,output:$('output').value,model:$('model').value});await status()}catch(e){error(e)}};
+$('stop').onclick=async()=>{try{await post('/api/stop');await status()}catch(e){error(e)}};
+$('upload').onclick=async()=>{const f=$('file').files[0];if(!f)return error('Choose an audio or video file');try{$('error').textContent='';$('upload').disabled=true;$('status').textContent='Uploading…';const query=new URLSearchParams({output:$('output').value,model:$('model').value});await request('/api/transcribe-file?'+query,{method:'PUT',body:f});$('file').value='';await status()}catch(e){error(e);await status()}};
+refresh();status();setInterval(status,1200);
+</script></body></html>

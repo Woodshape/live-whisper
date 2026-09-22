@@ -1,0 +1,9 @@
+[project]
+name = "live-whisper"
+version = "0.1.0"
+description = "Local live and offline transcription with faster-whisper"
+requires-python = ">=3.10,<3.14"
+dependencies = ["faster-whisper>=1.1,<2", "numpy>=1.24,<3"]
+
+[tool.uv]
+package = false
