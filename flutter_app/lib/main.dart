@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'backend_client.dart';
 
@@ -75,6 +76,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String? _source;
   String? _file;
   String _model = 'base';
+  String _language = 'de';
+  bool _languageReady = false;
   int _liveChunkSeconds = 4;
   String? _error;
   bool _pending = false;
@@ -85,6 +88,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     super.initState();
     unawaited(_refreshDevices());
     unawaited(_refreshStatus());
+    unawaited(_restoreLanguage());
     _poller = Timer.periodic(
       const Duration(seconds: 1),
       (_) => unawaited(_refreshStatus()),
@@ -97,6 +101,38 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _output.dispose();
     unawaited(widget.client.close());
     super.dispose();
+  }
+
+  Future<void> _restoreLanguage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        _language = prefs.getString('transcription_language') == 'en'
+            ? 'en'
+            : 'de';
+        _languageReady = true;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _languageReady = true;
+          _error = 'Cannot load language preference: $error';
+        });
+      }
+    }
+  }
+
+  Future<void> _changeLanguage(String language) async {
+    setState(() => _language = language);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('transcription_language', language);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Cannot save language preference: $error');
+      }
+    }
   }
 
   bool get _busy => [
@@ -116,9 +152,6 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       if (!mounted) return;
       setState(() {
         _status = status;
-        if (_output.text.isEmpty && status['output'] is String) {
-          _output.text = status['output'] as String;
-        }
         if (status['error'] is String &&
             (status['error'] as String).isNotEmpty) {
           _error = status['error'] as String;
@@ -332,7 +365,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ),
                     const SizedBox(height: 10),
                     SelectableText(
-                      '${_status['output'] ?? 'No output file selected'}',
+                      (_status['output'] as String?)?.isNotEmpty == true
+                          ? _status['output'] as String
+                          : 'Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)',
                       style: const TextStyle(color: Color(0xffadb8ca)),
                     ),
                     const Divider(height: 30),
@@ -449,14 +484,19 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       controller: _output,
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
-                        labelText: 'Output text file',
-                        hintText: '~/transcript.txt',
+                        labelText: 'Output text file (optional)',
+                        hintText: 'Automatic: ~/YYYY-MM-DD_HH-MM',
                         suffixIcon: IconButton(
                           onPressed: _pickOutput,
                           tooltip: 'Choose output file',
                           icon: const Icon(Icons.folder_open_outlined),
                         ),
                       ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Leave blank for a new timestamped file each session. Enter or choose a path to override; clear it to restore the default.',
+                      style: TextStyle(color: Color(0xffadb8ca)),
                     ),
                     const SizedBox(height: 10),
                     OutlinedButton.icon(
@@ -483,6 +523,32 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       onChanged: _busy || _pending
                           ? null
                           : (model) => setState(() => _model = model!),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('language-$_language'),
+                      initialValue: _language,
+                      decoration: const InputDecoration(
+                        labelText: 'Language / Sprache',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'de',
+                          child: Text('Deutsch (de)'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'en',
+                          child: Text('English (en)'),
+                        ),
+                      ],
+                      onChanged: _busy || _pending || !_languageReady
+                          ? null
+                          : (language) => unawaited(_changeLanguage(language!)),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Fixed for each session; saved for the next app launch. Select the main spoken language.',
+                      style: TextStyle(color: Color(0xffadb8ca)),
                     ),
                     const SizedBox(height: 10),
                     OutlinedButton.icon(
@@ -588,11 +654,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                           _busy ||
                               _pending ||
                               _source == null ||
-                              _output.text.trim().isEmpty
+                              !_languageReady
                           ? null
                           : () => _command('start_live', {
                               'source': _source,
                               'model': _model,
+                              'language': _language,
                               'output': _output.text,
                               'chunk_seconds': _liveChunkSeconds,
                             }),
@@ -632,14 +699,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     const SizedBox(height: 8),
                     FilledButton.icon(
                       onPressed:
-                          _busy ||
-                              _pending ||
-                              _file == null ||
-                              _output.text.trim().isEmpty
+                          _busy || _pending || _file == null || !_languageReady
                           ? null
                           : () => _command('start_file', {
                               'source': _file,
                               'model': _model,
+                              'language': _language,
                               'output': _output.text,
                             }),
                       icon: const Icon(Icons.play_arrow),

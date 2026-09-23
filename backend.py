@@ -20,15 +20,17 @@ def handle(engine: Transcriber, message: dict) -> dict:
     if command == "preload_model":
         engine.preload_model(message["model"])
     elif command == "start_live":
-        engine.start("live", message["source"], message["output"], message["model"],
-                     live_chunk_seconds=message.get("chunk_seconds", 8))
+        engine.start("live", message["source"], message.get("output"), message["model"],
+                     live_chunk_seconds=message.get("chunk_seconds", 8),
+                     **({"language": message["language"]} if "language" in message else {}))
     elif command == "start_file":
         source = Path(message["source"]).expanduser().resolve()
         if not source.is_file():
             raise ValueError("Choose an existing audio or video file")
         # Never delete a user's original recording. HTTP uploads are handled
         # separately and are owned by the HTTP worker.
-        engine.start("file", str(source), message["output"], message["model"])
+        engine.start("file", str(source), message.get("output"), message["model"],
+                     **({"language": message["language"]} if "language" in message else {}))
     elif command == "stop":
         engine.stop()
     elif command == "output":

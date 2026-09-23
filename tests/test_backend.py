@@ -35,6 +35,26 @@ class BackendTests(unittest.TestCase):
             backend.handle(engine, {'command': 'preload_model', 'model': 'base'})
             engine.preload_model.assert_called_once_with('base')
 
+    def test_desktop_start_allows_automatic_output(self):
+        with patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            backend.handle(engine, {'command': 'start_live', 'source': 'speaker.monitor', 'model': 'base'})
+            engine.start.assert_called_once_with('live', 'speaker.monitor', None,
+                                                 'base', live_chunk_seconds=8)
+
+    def test_desktop_language_is_forwarded_for_live_and_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            source = Path(directory) / 'recording.wav'
+            source.write_bytes(b'audio')
+            backend.handle(engine, {'command': 'start_live', 'source': 'speaker.monitor',
+                                    'model': 'small', 'language': 'de'})
+            engine.start.assert_called_with('live', 'speaker.monitor', None, 'small',
+                                           live_chunk_seconds=8, language='de')
+            backend.handle(engine, {'command': 'start_file', 'source': str(source),
+                                    'model': 'small', 'language': 'en'})
+            engine.start.assert_called_with('file', str(source), None, 'small', language='en')
+
     def test_desktop_live_preset_is_passed_to_worker(self):
         with patch.object(backend, 'Transcriber') as mocked:
             engine = mocked.return_value

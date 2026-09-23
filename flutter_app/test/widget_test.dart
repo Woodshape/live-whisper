@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:live_whisper/backend_client.dart';
 import 'package:live_whisper/main.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class FakeBackend implements TranscriptionClient {
   final commands = <String>[];
   Map<String, dynamic>? lastLiveArgs;
+  int sessions = 0;
   Map<String, dynamic> status = {
     'state': 'idle',
     'mode': '',
@@ -41,11 +43,14 @@ class FakeBackend implements TranscriptionClient {
     }
     if (command == 'start_live') {
       lastLiveArgs = args;
+      sessions++;
       status = {
         ...status,
         'state': 'running',
         'mode': 'live',
-        'output': args['output'],
+        'output': args['output'] == ''
+            ? '/home/test/2026-09-23_09-${sessions.toString().padLeft(2, '0')}'
+            : args['output'],
         'live_chunk_seconds': args['chunk_seconds'],
       };
     }
@@ -59,6 +64,8 @@ class FakeBackend implements TranscriptionClient {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   testWidgets('select source, output and start/stop live capture', (
     tester,
   ) async {
@@ -67,6 +74,10 @@ void main() {
     await tester.pump();
     expect(find.text('Default system audio'), findsOneWidget);
     expect(find.textContaining('Model ready'), findsNothing);
+    expect(
+      find.text('Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)'),
+      findsOneWidget,
+    );
     final field = find.byType(TextField);
     await tester.enterText(field, '/tmp/transcript.txt');
     await tester.pump();
@@ -76,6 +87,7 @@ void main() {
     await tester.pump();
     expect(backend.commands, contains('start_live'));
     expect(backend.lastLiveArgs?['chunk_seconds'], 4);
+    expect(backend.lastLiveArgs?['language'], 'de');
     expect(find.text('Running · live'), findsOneWidget);
     await tester.ensureVisible(find.text('Stop'));
     await tester.pump();
@@ -121,7 +133,6 @@ void main() {
     await tester.pump();
     expect(find.text('Ready · base model warmed'), findsOneWidget);
     expect(find.text('Model ready in memory'), findsOneWidget);
-    await tester.enterText(find.byType(TextField), '/tmp/transcript.txt');
     await tester.ensureVisible(find.text('Start live transcription'));
     await tester.pump();
     expect(
@@ -133,6 +144,83 @@ void main() {
       isNotNull,
     );
   });
+
+  testWidgets(
+    'blank output stays automatic across sessions; explicit path overrides',
+    (tester) async {
+      final backend = FakeBackend();
+      await tester.pumpWidget(LiveWhisperApp(client: backend));
+      await tester.pump();
+      final output = find.byType(TextField);
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.pump();
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(backend.lastLiveArgs?['output'], '');
+      expect(backend.status['output'], '/home/test/2026-09-23_09-01');
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<TextField>(output).controller!.text, '');
+      await tester.ensureVisible(find.text('Stop'));
+      await tester.tap(find.text('Stop'));
+      await tester.pump();
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(backend.lastLiveArgs?['output'], '');
+      expect(backend.status['output'], '/home/test/2026-09-23_09-02');
+
+      await tester.ensureVisible(find.text('Stop'));
+      await tester.tap(find.text('Stop'));
+      await tester.pump();
+      await tester.enterText(output, '/tmp/custom.txt');
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(backend.lastLiveArgs?['output'], '/tmp/custom.txt');
+
+      await tester.ensureVisible(find.text('Stop'));
+      await tester.tap(find.text('Stop'));
+      await tester.pump();
+      await tester.enterText(output, '');
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(backend.lastLiveArgs?['output'], '');
+    },
+  );
+
+  testWidgets(
+    'language selection persists across app restarts and is sent on start',
+    (tester) async {
+      final backend = FakeBackend();
+      await tester.pumpWidget(LiveWhisperApp(client: backend));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Deutsch (de)'));
+      await tester.pump();
+      await tester.tap(find.text('Deutsch (de)').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('English (en)').last);
+      await tester.pumpAndSettle();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('transcription_language'), 'en');
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.pump();
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(backend.lastLiveArgs?['language'], 'en');
+
+      await tester.pumpWidget(const SizedBox());
+      final restarted = FakeBackend();
+      await tester.pumpWidget(LiveWhisperApp(client: restarted));
+      await tester.pumpAndSettle();
+      expect(find.text('English (en)'), findsOneWidget);
+      await tester.ensureVisible(find.text('Start live transcription'));
+      await tester.pump();
+      await tester.tap(find.text('Start live transcription'));
+      await tester.pump();
+      expect(restarted.lastLiveArgs?['language'], 'en');
+    },
+  );
 
   testWidgets('higher accuracy preset sends eight-second chunks', (
     tester,

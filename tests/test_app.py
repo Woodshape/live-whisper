@@ -1,4 +1,5 @@
 import io
+from datetime import datetime
 import math
 import tempfile
 import threading
@@ -27,6 +28,49 @@ def wait_for(engine):
 
 
 class TranscriberTests(unittest.TestCase):
+    def test_default_path_uses_local_start_time_without_seconds(self):
+        with patch.object(app, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 23, 9, 7, 55)
+            self.assertEqual(app.default_output_path(), str(Path.home() / "2026-09-23_09-07"))
+
+    def test_blank_output_generates_a_fresh_path_for_each_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "input.wav"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            first = Path(directory) / "2026-09-23_09-07"
+            second = Path(directory) / "2026-09-23_09-08"
+            engine = app.Transcriber()
+            with patch.object(app, "load_model", return_value=FakeModel()), \
+                 patch.object(app, "default_output_path", side_effect=[str(first), str(second)]) as default:
+                engine.start("file", str(src), "", "tiny")
+                self.assertEqual(wait_for(engine)["output"], str(first))
+                engine.start("file", str(src), None, "tiny")
+                self.assertEqual(wait_for(engine)["output"], str(second))
+                self.assertEqual(default.call_count, 2)
+            self.assertIn("hello world", first.read_text())
+            self.assertIn("hello world", second.read_text())
+
+    def test_explicit_output_overrides_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "input.wav"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            output = Path(directory) / "my-transcript.txt"
+            engine = app.Transcriber()
+            with patch.object(app, "load_model", return_value=FakeModel()), \
+                 patch.object(app, "default_output_path") as default:
+                engine.start("file", str(src), str(output), "tiny")
+                self.assertEqual(wait_for(engine)["output"], str(output))
+                default.assert_not_called()
+            self.assertTrue(output.is_file())
+
     def test_file_transcription_appends_and_preserves_original_media(self):
         with tempfile.TemporaryDirectory() as directory:
             src = Path(directory) / "input.wav"
@@ -43,6 +87,35 @@ class TranscriberTests(unittest.TestCase):
                 self.assertEqual(wait_for(engine)["state"], "finished")
             self.assertEqual(dst.read_text(), "existing\n[00:00:00] hello world\n")
             self.assertTrue(src.exists())
+
+    def test_language_is_fixed_per_session_even_when_reusing_a_warm_model(self):
+        options_seen = []
+        class RecordingModel:
+            def transcribe(self, audio, **kwargs):
+                options_seen.append(kwargs)
+                return iter([type("Segment", (), {"text": " speech"})()]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "input.wav"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            engine = app.Transcriber()
+            output = str(Path(directory) / "out.txt")
+            with self.assertRaisesRegex(ValueError, "Language must be de or en"):
+                engine.start("file", str(src), output, "tiny", language="fr")
+            self.assertFalse(Path(output).exists())
+            with patch.object(app, "load_model", return_value=RecordingModel()) as loader:
+                for language in ("de", "en", None):
+                    engine.start("file", str(src), output, "tiny", language=language)
+                    status = wait_for(engine)
+                    self.assertEqual(status["state"], "finished")
+                    self.assertEqual(status["language"], language)
+                loader.assert_called_once()
+            self.assertEqual([options.get("language") for options in options_seen], ["de", "en", None])
+            self.assertNotIn("language", options_seen[-1])
 
     def test_speed_and_audio_backlog_update_after_chunk_finishes(self):
         transcribing, release = threading.Event(), threading.Event()
@@ -304,6 +377,13 @@ class TranscriberTests(unittest.TestCase):
                     with urllib.request.urlopen(urllib.request.Request(url, data=src.read_bytes(), method="PUT", headers={"Origin": f"http://127.0.0.1:{server.server_port}"})) as response:
                         self.assertEqual(response.status, 200)
                     self.assertEqual(wait_for(engine)["state"], "finished")
+                    automatic = Path(directory) / "2026-09-23_09-07"
+                    with patch.object(app, "default_output_path", return_value=str(automatic)):
+                        default_url = f"http://127.0.0.1:{server.server_port}/api/transcribe-file?model=tiny"
+                        with urllib.request.urlopen(urllib.request.Request(default_url, data=src.read_bytes(), method="PUT", headers={"Origin": f"http://127.0.0.1:{server.server_port}"})) as response:
+                            self.assertEqual(response.status, 200)
+                        self.assertEqual(wait_for(engine)["output"], str(automatic))
+                self.assertIn("hello world", automatic.read_text())
                 self.assertIn("hello world", dst.read_text())
                 self.assertTrue(src.exists())
         finally:

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -23,6 +24,11 @@ LIVE_CHUNK_PRESETS = {4, 8}
 FILE_SECONDS = 30
 MODELS = {"tiny", "base", "small", "medium", "large-v3"}
 MAX_UPLOAD = 4 * 1024**3
+
+
+def default_output_path() -> str:
+    # Local wall-clock time when the transcription starts; minute precision by design.
+    return str(Path.home() / datetime.now().strftime("%Y-%m-%d_%H-%M"))
 
 
 def devices() -> list[dict[str, str]]:
@@ -100,6 +106,7 @@ class Transcriber:
         self.mode = ""
         self.output = ""
         self.model_name = ""
+        self.language = None
         self.warm_model = None
         self.warm_model_name = None
         self.live_chunk_seconds = LIVE_SECONDS
@@ -123,7 +130,8 @@ class Transcriber:
     def status(self) -> dict:
         with self.lock:
             return {"state": self.state, "mode": self.mode, "output": self.output,
-                    "model": self.model_name, "ready_model": self.warm_model_name,
+                    "model": self.model_name, "language": self.language,
+                    "ready_model": self.warm_model_name,
                     "live_chunk_seconds": self.live_chunk_seconds,
                     "lines": self.lines,
                     "recent_lines": list(self.recent_lines), "error": self.error,
@@ -205,14 +213,17 @@ class Transcriber:
         with self.lock:
             self.output = str(path)
 
-    def start(self, mode: str, source: str, output: str, model: str,
-              remove_source: bool = False, live_chunk_seconds: int | None = None) -> None:
+    def start(self, mode: str, source: str, output: str | None, model: str,
+              remove_source: bool = False, live_chunk_seconds: int | None = None,
+              language: str | None = None) -> None:
         if live_chunk_seconds is None:
             live_chunk_seconds = LIVE_SECONDS
         if type(live_chunk_seconds) is not int or live_chunk_seconds not in LIVE_CHUNK_PRESETS:
             raise ValueError("Live chunk length must be 4 or 8 seconds")
         if model not in MODELS:
             raise ValueError("Unknown model")
+        if language not in (None, "de", "en"):
+            raise ValueError("Language must be de or en")
         if mode not in ("live", "file"):
             raise ValueError("Unknown mode")
         if not source:
@@ -222,10 +233,13 @@ class Transcriber:
         with self.lock:
             if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading"):
                 raise ValueError("A transcription or model load is already in progress")
-            if mode == "file" and Path(output).expanduser().resolve() == Path(source).resolve():
+            if output is None or (isinstance(output, str) and not output.strip()):
+                output = default_output_path()
+            if mode == "file" and isinstance(output, str) and Path(output).expanduser().resolve() == Path(source).resolve():
                 raise ValueError("Input and output must be different files")
             self.set_output(output)
             self.mode, self.model_name, self.lines, self.error = mode, model, 0, ""
+            self.language = language
             self.live_chunk_seconds = live_chunk_seconds
             self.recent_lines.clear()
             self.captured_seconds, self.processed_seconds = 0.0, 0.0
@@ -242,7 +256,7 @@ class Transcriber:
             self.stop_event = threading.Event()
             self.state = "loading"
             threading.Thread(target=self._run, args=(mode, source, model, self.stop_event,
-                                                     remove_source, live_chunk_seconds), daemon=True).start()
+                                                     remove_source, live_chunk_seconds, language), daemon=True).start()
 
     def stop(self) -> None:
         with self.lock:
@@ -254,7 +268,7 @@ class Transcriber:
                 self.proc.terminate()
 
     def _run(self, mode: str, source: str, name: str, stop: threading.Event,
-             remove_source: bool, live_chunk_seconds: int) -> None:
+             remove_source: bool, live_chunk_seconds: int, language: str | None) -> None:
         proc = None
         reader = None
         try:
@@ -331,7 +345,10 @@ class Transcriber:
                     speech = bool(np.max(np.abs(audio)) > 0.003)
                     if speech:
                         started = time.monotonic()
-                        segments, _ = model.transcribe(audio, beam_size=5, vad_filter=True)
+                        options = {"beam_size": 5, "vad_filter": True}
+                        if language is not None:
+                            options["language"] = language
+                        segments, _ = model.transcribe(audio, **options)
                         text = " ".join(" ".join(seg.text.split()) for seg in segments if seg.text.strip()).strip()
                         if text:
                             line = f"[{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}] {text}"
@@ -423,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(size))
             path = urlsplit(self.path).path
             if path == "/api/start":
-                self.engine.start("live", data["source"], data["output"], data["model"])
+                self.engine.start("live", data["source"], data.get("output"), data["model"])
             elif path == "/api/output":
                 self.engine.set_output(data["output"])
             elif path == "/api/stop":
@@ -446,13 +463,16 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < size <= MAX_UPLOAD:
                 raise ValueError("Select a nonempty file of at most 4 GiB")
             query = parse_qs(path.query)
-            output, model = query["output"][0], query["model"][0]
+            output, model = query.get("output", [""])[0], query["model"][0]
             with self.engine.lock:
                 if self.engine.state in ("loading", "capturing", "running", "stopping", "uploading"):
                     raise ValueError("A transcription is already in progress")
                 if model not in MODELS:
                     raise ValueError("Unknown model")
-                self.engine.set_output(output)
+                if output.strip():
+                    self.engine.set_output(output)
+                else:
+                    self.engine.output = ""  # The default is chosen at start, after upload.
                 self.engine.state = "uploading"
                 self.engine.stop_event = threading.Event()
                 stop = self.engine.stop_event
