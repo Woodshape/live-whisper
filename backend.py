@@ -17,7 +17,9 @@ def handle(engine: Transcriber, message: dict) -> dict:
         return engine.status()
     if command == "devices":
         return {"devices": devices()}
-    if command == "start_live":
+    if command == "preload_model":
+        engine.preload_model(message["model"])
+    elif command == "start_live":
         engine.start("live", message["source"], message["output"], message["model"],
                      live_chunk_seconds=message.get("chunk_seconds", 8))
     elif command == "start_file":

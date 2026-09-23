@@ -29,6 +29,12 @@ class BackendTests(unittest.TestCase):
                 engine.start.assert_called_once_with('file', str(source), str(output), 'tiny')
                 self.assertTrue(source.exists())
 
+    def test_preload_model_command(self):
+        with patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            backend.handle(engine, {'command': 'preload_model', 'model': 'base'})
+            engine.preload_model.assert_called_once_with('base')
+
     def test_desktop_live_preset_is_passed_to_worker(self):
         with patch.object(backend, 'Transcriber') as mocked:
             engine = mocked.return_value

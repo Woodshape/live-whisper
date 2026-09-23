@@ -101,6 +101,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
   bool get _busy => [
     'uploading',
+    'preloading',
     'loading',
     'capturing',
     'running',
@@ -196,6 +197,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final lines = _status['lines'] as num? ?? 0;
     final speed = _status['processing_speed'] as num?;
     final backlog = _status['backlog_seconds'] as num? ?? 0;
+    final modelPhase = _status['model_phase'] as String?;
+    final modelReady = _status['ready_model'] == _model;
+    final downloadDone = _status['model_download_bytes'] as num? ?? 0;
+    final downloadTotal = _status['model_download_total'] as num? ?? 0;
+    final downloadEta = _status['model_download_eta_seconds'] as num?;
+    final loadElapsed = _status['model_load_elapsed_seconds'] as num? ?? 0;
+    final downloadText = downloadTotal > 0
+        ? 'Model download: ${(100 * downloadDone / downloadTotal).clamp(0, 100).toStringAsFixed(0)}% · '
+              '${(downloadDone / 1048576).toStringAsFixed(0)} / ${(downloadTotal / 1048576).toStringAsFixed(0)} MiB'
+              '${downloadEta == null ? ' · calculating download ETA' : ' · ~${downloadEta.ceil()}s download remaining'}'
+              ' · initialization follows (time unknown)'
+        : 'Checking model cache · ${loadElapsed}s elapsed; download ETA not available yet';
     // For files the decoder can fill the buffer immediately; divide queued audio
     // by recent inference speed to estimate how long processing it will take.
     // Live capture has no fixed endpoint, so it cannot have a completion ETA.
@@ -213,6 +226,24 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         : etaSeconds < 60
         ? '   ·   ~${etaSeconds}s remaining'
         : '   ·   ~${(etaSeconds / 60).ceil()} min remaining';
+    final speedLabel = switch (modelPhase) {
+      'downloading' => downloadText,
+      'initializing' =>
+        'Initializing model · ${loadElapsed}s elapsed · ETA unknown on first load',
+      'checking' =>
+        'Checking model cache · ${loadElapsed}s elapsed; download ETA not available yet',
+      _
+          when speed == null &&
+              (state == 'running' || state == 'stopping') &&
+              _status['audio_detected'] == true =>
+        'Model ready · waiting for first processed speech chunk',
+      _ when speed == null && (state == 'running' || state == 'stopping') =>
+        'Model ready · waiting for speech',
+      _ when speed == null =>
+        'Transcription speed: available after speech is processed',
+      _ =>
+        '${speed.toStringAsFixed(2)}× real time   ·   ${backlog.toStringAsFixed(1)}s audio waiting$etaText',
+    };
     final recentLines = (_status['recent_lines'] as List? ?? const [])
         .cast<String>()
         .reversed
@@ -227,10 +258,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         ? const Color(0xffffb4ac)
         : const Color(0xff9fe4c2);
     final statusLabel = switch (state) {
-      'capturing' => 'Capturing · loading model',
+      'capturing' =>
+        modelPhase == null
+            ? 'Capturing · model ready'
+            : 'Capturing · ${modelPhase == 'downloading' ? 'downloading model' : 'loading model'}',
       'running' => 'Running · ${_status['mode']}',
       'stopping' => 'Finishing buffered audio',
       'loading' => 'Starting',
+      'preloading' => 'Pre-loading · ${_status['model']} model',
+      'idle' when modelReady => 'Ready · $_model model warmed',
       'error' => 'Error',
       _ => '${state[0].toUpperCase()}${state.substring(1)}',
     };
@@ -266,16 +302,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       children: [
                         Icon(Icons.circle, color: color, size: 13),
                         const SizedBox(width: 10),
-                        Text(
-                          statusLabel,
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(
-                                color: color,
-                                fontWeight: FontWeight.w700,
-                              ),
+                        Expanded(
+                          child: Text(
+                            statusLabel,
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(
+                                  color: color,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                          ),
                         ),
-                        const Spacer(),
-                        if (_busy)
+                        const SizedBox(width: 8),
+                        if (_busy && state != 'preloading')
                           OutlinedButton.icon(
                             onPressed: state == 'stopping' || _pending
                                 ? null
@@ -287,7 +325,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      '$lines transcript lines  ·  ${captured}s captured  ·  ${_status['audio_detected'] == true ? 'Audio detected' : 'Waiting for audio'}',
+                      state == 'preloading'
+                          ? 'Preparing the model before capture; no audio is being recorded yet.'
+                          : '$lines transcript lines  ·  ${captured}s captured  ·  ${_status['audio_detected'] == true ? 'Audio detected' : 'Waiting for audio'}',
                       style: Theme.of(context).textTheme.bodyLarge,
                     ),
                     const SizedBox(height: 10),
@@ -297,9 +337,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ),
                     const Divider(height: 30),
                     Text(
-                      speed == null
-                          ? 'Transcription speed: waiting for speech or model'
-                          : '${speed.toStringAsFixed(2)}× real time   ·   ${backlog.toStringAsFixed(1)}s audio waiting$etaText',
+                      speedLabel,
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         color: fallingBehind
                             ? const Color(0xffffb4ac)
@@ -307,6 +345,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    if (modelPhase != null &&
+                        state != 'preloading' &&
+                        _status['mode'] == 'live')
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Audio is being buffered from the start; transcription will catch up when the model is ready.',
+                        ),
+                      ),
                     if (_status['mode'] == 'live')
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
@@ -433,9 +480,28 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                             ),
                           )
                           .toList(),
-                      onChanged: _busy
+                      onChanged: _busy || _pending
                           ? null
                           : (model) => setState(() => _model = model!),
+                    ),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: _busy || _pending || modelReady
+                          ? null
+                          : () => _command('preload_model', {'model': _model}),
+                      icon: const Icon(Icons.memory),
+                      label: Text(
+                        modelReady
+                            ? 'Model ready in memory'
+                            : state == 'preloading'
+                            ? 'Pre-loading model…'
+                            : 'Pre-load model',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Optional. Start loads the model automatically if needed. A pre-loaded model skips that wait; the first transcript still takes an audio chunk plus inference.',
+                      style: TextStyle(color: Color(0xffadb8ca)),
                     ),
                   ],
                 ),

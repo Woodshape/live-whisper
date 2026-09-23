@@ -31,6 +31,14 @@ class FakeBackend implements TranscriptionClient {
         ],
       };
     }
+    if (command == 'preload_model') {
+      status = {
+        ...status,
+        'state': 'preloading',
+        'model': args['model'],
+        'model_phase': 'checking',
+      };
+    }
     if (command == 'start_live') {
       lastLiveArgs = args;
       status = {
@@ -58,6 +66,7 @@ void main() {
     await tester.pumpWidget(LiveWhisperApp(client: backend));
     await tester.pump();
     expect(find.text('Default system audio'), findsOneWidget);
+    expect(find.textContaining('Model ready'), findsNothing);
     final field = find.byType(TextField);
     await tester.enterText(field, '/tmp/transcript.txt');
     await tester.pump();
@@ -73,6 +82,56 @@ void main() {
     await tester.tap(find.text('Stop'));
     await tester.pump();
     expect(backend.commands, contains('stop'));
+  });
+
+  testWidgets('pre-load button warms selected model before capture', (
+    tester,
+  ) async {
+    final backend = FakeBackend();
+    await tester.pumpWidget(LiveWhisperApp(client: backend));
+    await tester.pump();
+    await tester.ensureVisible(find.text('Pre-load model'));
+    await tester.pump();
+    await tester.tap(find.text('Pre-load model'));
+    await tester.pump();
+    expect(backend.commands, contains('preload_model'));
+    expect(backend.status['model'], 'base');
+    expect(find.text('Pre-loading · base model'), findsOneWidget);
+    expect(
+      find.textContaining('no audio is being recorded yet'),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Start live transcription'),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(find.text('Stop'), findsNothing);
+
+    backend.status = {
+      ...backend.status,
+      'state': 'idle',
+      'model_phase': null,
+      'ready_model': 'base',
+    };
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(find.text('Ready · base model warmed'), findsOneWidget);
+    expect(find.text('Model ready in memory'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '/tmp/transcript.txt');
+    await tester.ensureVisible(find.text('Start live transcription'));
+    await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Start live transcription'),
+          )
+          .onPressed,
+      isNotNull,
+    );
   });
 
   testWidgets('higher accuracy preset sends eight-second chunks', (
@@ -124,6 +183,62 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pump();
       expect(find.text('[00:00:16] Third line'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'distinguishes model download from speech and shows download ETA',
+    (tester) async {
+      final backend = FakeBackend();
+      backend.status = {
+        ...backend.status,
+        'state': 'capturing',
+        'mode': 'live',
+        'audio_detected': true,
+        'captured_seconds': 47,
+        'model_phase': 'downloading',
+        'model_download_bytes': 26214400,
+        'model_download_total': 104857600,
+        'model_download_eta_seconds': 18,
+      };
+      await tester.pumpWidget(LiveWhisperApp(client: backend));
+      await tester.pump();
+      expect(find.text('Capturing · downloading model'), findsOneWidget);
+      expect(find.textContaining('25%'), findsOneWidget);
+      expect(find.textContaining('~18s download remaining'), findsOneWidget);
+      expect(
+        find.textContaining('initialization follows (time unknown)'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Audio is being buffered from the start'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('waiting for speech or model'), findsNothing);
+
+      backend.status = {...backend.status, 'model_phase': 'initializing'};
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(find.textContaining('Initializing model'), findsOneWidget);
+      expect(find.textContaining('ETA unknown on first load'), findsOneWidget);
+
+      backend.status = {
+        ...backend.status,
+        'state': 'running',
+        'model_phase': null,
+      };
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(
+        find.textContaining(
+          'Model ready · waiting for first processed speech chunk',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Audio is being buffered from the start'),
+        findsNothing,
+      );
     },
   );
 

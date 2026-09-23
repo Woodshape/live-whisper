@@ -157,9 +157,112 @@ class TranscriberTests(unittest.TestCase):
                 engine.start("file", "source", "result.txt", "bad")
             self.assertEqual(engine.status()["state"], "idle")
 
+    def test_model_progress_and_download_eta(self):
+        engine = app.Transcriber()
+        with patch.object(app.time, "monotonic", side_effect=[10, 14]):
+            engine._model_progress("downloading", 100, 1000)
+            self.assertIsNone(engine.status()["model_download_eta_seconds"])
+            engine._model_progress("downloading", 400, 1000)
+            self.assertEqual(engine.status()["model_download_eta_seconds"], 6)
+        engine._model_progress("initializing", 0, 0)
+        self.assertEqual(engine.status()["model_phase"], "initializing")
+        self.assertIsNone(engine.status()["model_download_eta_seconds"])
+
+    def test_model_download_uses_progress_and_local_model_path(self):
+        from faster_whisper import WhisperModel
+        from huggingface_hub import snapshot_download
+        events = []
+        def fake_download(repo, **kwargs):
+            self.assertEqual(repo, "Systran/faster-whisper-base")
+            progress = kwargs["tqdm_class"](desc="Downloading bytes", total=1000)
+            progress.update(250)
+            progress.close()
+            return "/cached/model"
+        with patch("huggingface_hub.snapshot_download", side_effect=fake_download), \
+             patch("faster_whisper.WhisperModel", return_value=FakeModel()) as model:
+            app.load_model("base", progress=lambda *values: events.append(values))
+        self.assertIn(("downloading", 250, 1000), events)
+        self.assertEqual(events[-1], ("initializing", 0, 0))
+        model.assert_called_once_with("/cached/model", device="cpu", compute_type="int8")
+
+    def test_preload_warms_model_without_capture_and_reuses_it(self):
+        entered, release = threading.Event(), threading.Event()
+        model = FakeModel()
+        def slow_load(name, progress=None):
+            entered.set()
+            release.wait(2)
+            progress("initializing", 0, 0)
+            return model
+
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "input.wav"
+            dst = Path(directory) / "out.txt"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            engine = app.Transcriber()
+            with patch.object(app, "load_model", side_effect=slow_load) as loader:
+                engine.preload_model("tiny")
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(engine.status()["state"], "preloading")
+                self.assertEqual(engine.status()["model_phase"], "checking")
+                self.assertEqual(engine.status()["captured_seconds"], 0)
+                self.assertIsNone(engine.status()["ready_model"])
+                with self.assertRaisesRegex(ValueError, "already in progress"):
+                    engine.start("file", str(src), str(dst), "tiny")
+                release.set()
+                for _ in range(100):
+                    if engine.status()["ready_model"] == "tiny":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(engine.status()["state"], "idle")
+                self.assertIsNone(engine.status()["model_phase"])
+                engine.preload_model("tiny")  # No redundant load.
+                engine.start("file", str(src), str(dst), "tiny")
+                self.assertEqual(wait_for(engine)["state"], "finished")
+                self.assertEqual(loader.call_count, 1)
+                self.assertIn("hello world", dst.read_text())
+
+    def test_start_auto_loads_and_reuses_model_until_selection_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "input.wav"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            engine = app.Transcriber()
+            with patch.object(app, "load_model", side_effect=lambda name, progress=None: FakeModel()) as loader:
+                for name in ("tiny", "tiny", "base"):
+                    engine.start("file", str(src), str(Path(directory) / "out.txt"), name)
+                    done = wait_for(engine)
+                    self.assertEqual(done["state"], "finished")
+                    self.assertEqual(done["ready_model"], name)
+                self.assertEqual([call.args[0] for call in loader.call_args_list], ["tiny", "base"])
+
+    def test_preload_failure_reports_error_and_allows_retry(self):
+        engine = app.Transcriber()
+        with self.assertRaisesRegex(ValueError, "Unknown model"):
+            engine.preload_model("bad")
+        with patch.object(app, "load_model", side_effect=RuntimeError("download failed")):
+            engine.preload_model("tiny")
+            self.assertEqual(wait_for(engine)["state"], "error")
+            self.assertIsNone(engine.status()["ready_model"])
+            self.assertIsNone(engine.status()["model_phase"])
+        with patch.object(app, "load_model", return_value=FakeModel()):
+            engine.preload_model("tiny")
+            for _ in range(100):
+                if engine.status()["ready_model"] == "tiny":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(engine.status()["state"], "idle")
+        self.assertEqual(engine.status()["error"], "")
+
     def test_stop_during_model_load(self):
         entered, release = threading.Event(), threading.Event()
-        def slow_model(name):
+        def slow_model(name, **kwargs):
             entered.set()
             release.wait(2)
             return FakeModel()
@@ -170,9 +273,12 @@ class TranscriberTests(unittest.TestCase):
             with patch.object(app, "load_model", side_effect=slow_model):
                 engine.start("file", str(src), str(Path(directory) / "out"), "tiny")
                 self.assertTrue(entered.wait(1))
+                self.assertEqual(engine.status()["model_phase"], "checking")
                 engine.stop()
                 release.set()
-                self.assertEqual(wait_for(engine)["state"], "stopped")
+                done = wait_for(engine)
+                self.assertEqual(done["state"], "stopped")
+                self.assertIsNone(done["model_phase"])
             self.assertTrue(src.exists())
 
     def test_http_file_upload_transcribes_without_playback(self):
@@ -223,7 +329,7 @@ class TranscriberTests(unittest.TestCase):
             def kill(self):
                 pass
 
-        def delayed_model(name):
+        def delayed_model(name, **kwargs):
             loading.set()
             release.wait(2)
             return FakeModel()

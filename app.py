@@ -58,9 +58,39 @@ def capture_command(mode: str, source: str) -> list[str]:
     return cmd + ["-vn", "-ac", "1", "-ar", str(RATE), "-f", "s16le", "pipe:1"]
 
 
-def load_model(name: str):
+def load_model(name: str, progress=None):
     from faster_whisper import WhisperModel
-    return WhisperModel(name, device="cpu", compute_type="int8")
+    if progress is None:
+        return WhisperModel(name, device="cpu", compute_type="int8")
+
+    # Use the same model repository, cache and file selection as faster-whisper,
+    # but expose Hugging Face's aggregate byte progress instead of suppressing it.
+    # The returned directory is then loaded locally (no second download).
+    from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+
+    with open(os.devnull, "w") as quiet:
+        class DownloadProgress(tqdm):
+            def __init__(self, *args, **kwargs):
+                self.track_bytes = kwargs.get("desc") == "Downloading bytes"
+                kwargs["file"] = quiet
+                kwargs["disable"] = False  # keep byte counters active without terminal output
+                super().__init__(*args, **kwargs)
+
+            def update(self, n=1):
+                result = super().update(n)
+                if self.track_bytes and self.total and self.n > 0:
+                    progress("downloading", self.n, self.total)
+                return result
+
+        path = snapshot_download(
+            f"Systran/faster-whisper-{name}",
+            allow_patterns=["config.json", "preprocessor_config.json", "model.bin",
+                            "tokenizer.json", "vocabulary.*"],
+            tqdm_class=DownloadProgress,
+        )
+    progress("initializing", 0, 0)
+    return WhisperModel(path, device="cpu", compute_type="int8")
 
 
 class Transcriber:
@@ -70,12 +100,20 @@ class Transcriber:
         self.mode = ""
         self.output = ""
         self.model_name = ""
+        self.warm_model = None
+        self.warm_model_name = None
         self.live_chunk_seconds = LIVE_SECONDS
         self.lines = 0
         self.recent_lines = deque(maxlen=10)
         self.captured_seconds = 0.0
         self.processed_seconds = 0.0
         self.processing_speed = None
+        self.model_phase = None
+        self.model_load_started = None
+        self.model_download_bytes = 0
+        self.model_download_total = 0
+        self.model_download_eta_seconds = None
+        self.model_download_started = None
         self.recent_chunks = deque(maxlen=5)
         self.audio_detected = False
         self.error = ""
@@ -85,13 +123,75 @@ class Transcriber:
     def status(self) -> dict:
         with self.lock:
             return {"state": self.state, "mode": self.mode, "output": self.output,
-                    "model": self.model_name, "live_chunk_seconds": self.live_chunk_seconds,
+                    "model": self.model_name, "ready_model": self.warm_model_name,
+                    "live_chunk_seconds": self.live_chunk_seconds,
                     "lines": self.lines,
                     "recent_lines": list(self.recent_lines), "error": self.error,
                     "captured_seconds": self.captured_seconds, "audio_detected": self.audio_detected,
                     "processed_seconds": self.processed_seconds,
                     "backlog_seconds": round(max(0, self.captured_seconds - self.processed_seconds), 1),
-                    "processing_speed": self.processing_speed}
+                    "processing_speed": self.processing_speed,
+                    "model_phase": self.model_phase,
+                    "model_load_elapsed_seconds": round(time.monotonic() - self.model_load_started)
+                    if self.model_phase and self.model_load_started is not None else None,
+                    "model_download_bytes": self.model_download_bytes,
+                    "model_download_total": self.model_download_total,
+                    "model_download_eta_seconds": self.model_download_eta_seconds}
+
+    def _model_progress(self, phase: str, done: int, total: int) -> None:
+        with self.lock:
+            self.model_phase = phase
+            if phase != "downloading":
+                self.model_download_eta_seconds = None
+                return
+            now = time.monotonic()
+            if self.model_download_started is None:
+                self.model_download_started = now
+            self.model_download_bytes = done
+            self.model_download_total = total
+            elapsed = now - self.model_download_started
+            # Wait for a usable rate; the estimate can change with the connection.
+            self.model_download_eta_seconds = (
+                round((total - done) * elapsed / done)
+                if elapsed >= 2 and done > 0 and total > done else None
+            )
+
+    def preload_model(self, name: str) -> None:
+        if name not in MODELS:
+            raise ValueError("Unknown model")
+        with self.lock:
+            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading"):
+                raise ValueError("A transcription or model load is already in progress")
+            if self.warm_model_name == name and self.warm_model is not None:
+                return
+            # Retain only one model in RAM at a time.
+            self.warm_model = self.warm_model_name = None
+            self.model_name = name
+            self.mode = ""
+            self.error = ""
+            self.model_phase = "checking"
+            self.model_load_started = time.monotonic()
+            self.model_download_started = None
+            self.model_download_bytes = self.model_download_total = 0
+            self.model_download_eta_seconds = None
+            self.state = "preloading"
+            threading.Thread(target=self._preload, args=(name,), daemon=True).start()
+
+    def _preload(self, name: str) -> None:
+        try:
+            model = load_model(name, progress=self._model_progress)
+            with self.lock:
+                self.warm_model = model
+                self.warm_model_name = name
+                self.model_phase = None
+                self.state = "idle"
+        except Exception as exc:
+            with self.lock:
+                self.error = str(exc)
+                self.state = "error"
+        finally:
+            with self.lock:
+                self.model_phase = None
 
     def set_output(self, value: str) -> None:
         if not isinstance(value, str) or not value.strip():
@@ -120,8 +220,8 @@ class Transcriber:
         if mode == "live" and source not in {item["id"] for item in devices()}:
             raise ValueError("Audio source is no longer available; refresh devices")
         with self.lock:
-            if self.state in ("loading", "capturing", "running", "stopping", "uploading"):
-                raise ValueError("A transcription is already in progress")
+            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading"):
+                raise ValueError("A transcription or model load is already in progress")
             if mode == "file" and Path(output).expanduser().resolve() == Path(source).resolve():
                 raise ValueError("Input and output must be different files")
             self.set_output(output)
@@ -130,6 +230,13 @@ class Transcriber:
             self.recent_lines.clear()
             self.captured_seconds, self.processed_seconds = 0.0, 0.0
             self.processing_speed = None
+            if self.warm_model_name != model:
+                self.warm_model = self.warm_model_name = None
+            self.model_phase = None if self.warm_model is not None else "checking"
+            self.model_load_started = time.monotonic() if self.model_phase else None
+            self.model_download_started = None
+            self.model_download_bytes = self.model_download_total = 0
+            self.model_download_eta_seconds = None
             self.recent_chunks.clear()
             self.audio_detected = False
             self.stop_event = threading.Event()
@@ -192,8 +299,15 @@ class Transcriber:
                     else:
                         self.state = "capturing"
                 reader.start()
-                model = load_model(name)
                 with self.lock:
+                    model = self.warm_model if self.warm_model_name == name else None
+                if model is None:
+                    model = load_model(name, progress=self._model_progress)
+                    with self.lock:
+                        self.warm_model = model
+                        self.warm_model_name = name
+                with self.lock:
+                    self.model_phase = None
                     if not stop.is_set():
                         self.state = "running"
                 offset = 0
@@ -259,6 +373,7 @@ class Transcriber:
                 Path(source).unlink(missing_ok=True)
             with self.lock:
                 self.proc = None
+                self.model_phase = None
                 if self.state != "error":
                     self.state = "stopped" if stop.is_set() else "finished"
 
