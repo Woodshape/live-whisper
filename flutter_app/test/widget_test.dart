@@ -67,6 +67,9 @@ class FakeBackend implements TranscriptionClient {
       };
     }
     if (command == 'stop') status = {...status, 'state': 'stopped'};
+    if (command == 'cancel_buffered') {
+      status = {...status, 'cancel_requested': true};
+    }
     if (command == 'output') status = {...status, 'output': args['output']};
     return status;
   }
@@ -113,6 +116,70 @@ void main() {
     await tester.tap(find.byKey(const Key('quick-stop-button')));
     await tester.pump();
     expect(backend.commands, contains('stop'));
+  });
+
+  testWidgets('cancel buffered transcription after the current file chunk', (
+    tester,
+  ) async {
+    final backend = FakeBackend();
+    backend.status = {
+      ...backend.status,
+      'state': 'stopping',
+      'mode': 'file',
+      'input_source': 'file',
+      'backlog_seconds': 1322.1,
+      'processing_speed': 10.06,
+      'cancel_requested': false,
+    };
+    await tester.pumpWidget(LiveWhisperApp(client: backend));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Finishing buffered audio'), findsOneWidget);
+    expect(
+      find.text(
+        'Cancel finishes the current 30-second chunk before discarding the rest.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const Key('cancel-buffered-button')));
+    await tester.pump();
+    expect(backend.commands, contains('cancel_buffered'));
+    expect(find.text('Canceling…'), findsOneWidget);
+    expect(
+      find.textContaining('letting the current chunk finish'),
+      findsOneWidget,
+    );
+
+    backend.status = {
+      ...backend.status,
+      'state': 'cancelled',
+      'backlog_seconds': 1322.1,
+    };
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(find.text('Canceled · buffered audio discarded'), findsOneWidget);
+    expect(
+      find.textContaining('remaining buffered audio discarded'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('cancel is hidden while a YouTube import is still stopping', (
+    tester,
+  ) async {
+    final backend = FakeBackend();
+    backend.status = {
+      ...backend.status,
+      'state': 'stopping',
+      'mode': 'file',
+      'input_source': 'youtube',
+      'transcript_source': '',
+      'import_phase': 'downloading_audio',
+    };
+    await tester.pumpWidget(LiveWhisperApp(client: backend));
+    await tester.pumpAndSettle();
+    expect(find.text('Stopping YouTube import'), findsOneWidget);
+    expect(find.byKey(const Key('cancel-buffered-button')), findsNothing);
   });
 
   testWidgets('imports a YouTube URL and starts captions-first transcription', (

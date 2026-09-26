@@ -54,6 +54,12 @@ class BackendTests(unittest.TestCase):
             backend.handle(engine, {'command': 'preload_model', 'model': 'base'})
             engine.preload_model.assert_called_once_with('base')
 
+    def test_cancel_buffered_audio_command(self):
+        with patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            backend.handle(engine, {'command': 'cancel_buffered'})
+            engine.cancel_buffered_audio.assert_called_once_with()
+
     def test_desktop_start_allows_automatic_output(self):
         with patch.object(backend, 'Transcriber') as mocked:
             engine = mocked.return_value

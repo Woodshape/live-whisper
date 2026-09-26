@@ -87,6 +87,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   int _liveChunkSeconds = 4;
   String? _error;
   bool _pending = false;
+  bool _cancelPending = false;
   bool _polling = false;
 
   @override
@@ -358,6 +359,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final canStart = !_busy && !_pending && _source != null && _settingsReady;
     final canStop =
         _busy && state != 'preloading' && state != 'stopping' && !_pending;
+    final showCancel = state == 'stopping' && !youtubeImportInProgress;
+    final cancelRequested = _status['cancel_requested'] == true;
+    final cancellationPending = cancelRequested || _cancelPending;
+    final chunkSeconds = _status['mode'] == 'live'
+        ? (_status['live_chunk_seconds'] as num? ?? 4).toInt()
+        : 30;
     final outputPath = _output.text.trim().isNotEmpty
         ? _output.text.trim()
         : _busy && (_status['output'] as String? ?? '').isNotEmpty
@@ -399,6 +406,28 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     minimumSize: Size(compact ? 0 : 96, 40),
                   ),
                 );
+                final cancelButton = Tooltip(
+                  message:
+                      'Cancel after the current $chunkSeconds-second chunk finishes',
+                  child: OutlinedButton.icon(
+                    key: const Key('cancel-buffered-button'),
+                    onPressed: showCancel && !cancellationPending && !_pending
+                        ? () async {
+                            setState(() => _cancelPending = true);
+                            await _command('cancel_buffered');
+                            if (mounted) {
+                              setState(() => _cancelPending = false);
+                            }
+                          }
+                        : null,
+                    icon: const Icon(Icons.cancel_outlined),
+                    label: Text(cancellationPending ? 'Canceling…' : 'Cancel'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xffffb4ac),
+                      minimumSize: Size(compact ? 0 : 96, 40),
+                    ),
+                  ),
+                );
                 final title = Row(
                   children: [
                     Icon(Icons.circle, color: color, size: 13),
@@ -427,6 +456,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                           Expanded(child: stopButton),
                         ],
                       ),
+                      if (showCancel) ...[
+                        const SizedBox(height: 8),
+                        SizedBox(width: double.infinity, child: cancelButton),
+                      ],
                     ],
                   );
                 }
@@ -437,6 +470,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     startButton,
                     const SizedBox(width: 8),
                     stopButton,
+                    if (showCancel) ...[const SizedBox(width: 8), cancelButton],
                   ],
                 );
               },
@@ -525,6 +559,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                 fontWeight: FontWeight.w600,
               ),
             ),
+            if (showCancel)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  cancellationPending
+                      ? 'Cancellation requested; letting the current chunk finish before discarding the remaining buffer.'
+                      : 'Cancel finishes the current $chunkSeconds-second chunk before discarding the rest.',
+                  style: const TextStyle(color: Color(0xffadb8ca)),
+                ),
+              ),
             if (_status['model_phase'] != null &&
                 state != 'preloading' &&
                 _status['mode'] == 'live')
@@ -923,7 +967,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         : etaSeconds < 60
         ? '   ·   ~${etaSeconds}s remaining'
         : '   ·   ~${(etaSeconds / 60).ceil()} min remaining';
-    final speedLabel = state == 'importing'
+    final speedLabel = state == 'cancelled'
+        ? 'Canceled after the current chunk · remaining buffered audio discarded'
+        : state == 'importing'
         ? importText
         : youtubeImportInProgress
         ? 'Stopping YouTube import…'
@@ -972,6 +1018,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         youtubeImportInProgress
             ? 'Stopping YouTube import'
             : 'Finishing buffered audio',
+      'cancelled' => 'Canceled · buffered audio discarded',
       'loading' => 'Starting',
       'importing' => 'Importing YouTube video',
       'preloading' => 'Pre-loading · ${_status['model']} model',

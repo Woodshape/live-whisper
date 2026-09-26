@@ -159,6 +159,7 @@ class Transcriber:
         self.import_total_bytes = 0
         self.error = ""
         self.stop_event = threading.Event()
+        self.cancel_event = threading.Event()
         self.proc: subprocess.Popen | None = None
 
     def status(self) -> dict:
@@ -185,7 +186,8 @@ class Transcriber:
                     "transcript_language": self.transcript_language,
                     "import_phase": self.import_phase,
                     "import_downloaded_bytes": self.import_downloaded_bytes,
-                    "import_total_bytes": self.import_total_bytes}
+                    "import_total_bytes": self.import_total_bytes,
+                    "cancel_requested": self.cancel_event.is_set()}
 
     def _model_progress(self, phase: str, done: int, total: int) -> None:
         with self.lock:
@@ -283,6 +285,7 @@ class Transcriber:
         self.import_phase = None
         self.import_downloaded_bytes = self.import_total_bytes = 0
         self.stop_event = threading.Event()
+        self.cancel_event = threading.Event()
         self.state = initial_state
         return self.stop_event
 
@@ -418,8 +421,25 @@ class Transcriber:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
 
+    def cancel_buffered_audio(self) -> dict:
+        # Set the event before waiting for the status lock. The transcription
+        # worker holds that lock while writing each finished chunk, so this lets
+        # it complete the write and observe cancellation before claiming another.
+        cancel_event = self.cancel_event
+        if (
+            self.state != "stopping"
+            or self.mode not in ("live", "file")
+            or self.import_phase is not None
+            or (self.input_source == "youtube" and self.transcript_source != "whisper")
+        ):
+            raise ValueError("No buffered transcription is being finished")
+        cancel_event.set()
+        with self.lock:
+            return self.status()
+
     def _run(self, mode: str, source: str, name: str, stop: threading.Event,
              remove_source: bool, live_chunk_seconds: int, language: str | None) -> None:
+        cancel = self.cancel_event
         proc = None
         reader = None
         try:
@@ -478,6 +498,8 @@ class Transcriber:
                 offset = 0
                 size = (live_chunk_seconds if mode == "live" else FILE_SECONDS) * RATE * 2
                 while True:
+                    if cancel.is_set():
+                        break
                     with condition:
                         condition.wait_for(lambda: capture["written"] - offset >= size or capture["done"])
                         count = min(size, capture["written"] - offset)
@@ -486,6 +508,12 @@ class Transcriber:
                         continue
                     if not count:
                         break
+                    # Cancellation and claiming the next chunk are serialized by
+                    # the same lock as transcript writes. A queued cancel therefore
+                    # cannot cause a second chunk to start while a line is written.
+                    with self.lock:
+                        if cancel.is_set():
+                            break
                     seconds = offset // (RATE * 2)
                     pcm = os.pread(audio_file.fileno(), count // 2 * 2, offset)
                     offset += len(pcm)
@@ -543,7 +571,11 @@ class Transcriber:
                 self.proc = None
                 self.model_phase = None
                 if self.state != "error":
-                    self.state = "stopped" if stop.is_set() else "finished"
+                    self.state = (
+                        "cancelled"
+                        if cancel.is_set()
+                        else "stopped" if stop.is_set() else "finished"
+                    )
 
 
 class Handler(BaseHTTPRequestHandler):

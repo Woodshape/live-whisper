@@ -37,6 +37,8 @@ def handle(engine: Transcriber, message: dict) -> dict:
                      **({"language": message["language"]} if "language" in message else {}))
     elif command == "stop":
         engine.stop()
+    elif command == "cancel_buffered":
+        engine.cancel_buffered_audio()
     elif command == "output":
         engine.set_output(message["output"])
     else:

@@ -22,7 +22,7 @@ class FakeModel:
 
 def wait_for(engine):
     for _ in range(300):
-        if engine.status()["state"] in ("finished", "error", "stopped"):
+        if engine.status()["state"] in ("finished", "error", "stopped", "cancelled"):
             return engine.status()
         time.sleep(0.02)
     raise AssertionError(f"Worker did not finish: {engine.status()}")
@@ -248,6 +248,8 @@ class TranscriberTests(unittest.TestCase):
             self.assertTrue(entered.wait(3))
             engine.stop()
             self.assertEqual(engine.status()["state"], "stopping")
+            with self.assertRaisesRegex(ValueError, "buffered transcription"):
+                engine.cancel_buffered_audio()
             release.set()
             self.assertEqual(wait_for(engine)["state"], "stopped")
 
@@ -319,6 +321,134 @@ class TranscriberTests(unittest.TestCase):
             self.assertEqual(done["backlog_seconds"], 0.0)
             self.assertGreater(done["processing_speed"], 0)
             self.assertLess(done["processing_speed"], 100)
+
+    def test_cancel_finishes_the_current_30_second_chunk_before_discarding_rest(self):
+        transcribing = threading.Event()
+        release_transcription = threading.Event()
+        writing = threading.Event()
+        release_write = threading.Event()
+        cancel_returned = threading.Event()
+        chunk_lengths = []
+        cancel_responses = []
+        real_open = open
+
+        class SlowModel:
+            def transcribe(self, audio, **kwargs):
+                chunk_lengths.append(len(audio))
+                transcribing.set()
+                release_transcription.wait(3)
+                return iter([type("Segment", (), {"text": " finished chunk"})()]), None
+
+        class GatedWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def write(self, text):
+                writing.set()
+                if not release_write.wait(3):
+                    raise TimeoutError("test did not release the transcript write")
+                return self.stream.write(text)
+
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "recording.wav"
+            output = Path(directory) / "partial-transcript.txt"
+            with wave.open(str(src), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * (31 * app.RATE))
+
+            def gated_open(path, mode="r", *args, **kwargs):
+                stream = real_open(path, mode, *args, **kwargs)
+                if Path(path).resolve() == output.resolve() and mode == "a":
+                    return GatedWriter(stream)
+                return stream
+
+            engine = app.Transcriber()
+            cancel_thread = None
+            with (
+                patch.object(app, "load_model", return_value=SlowModel()),
+                patch("builtins.open", side_effect=gated_open),
+            ):
+                engine.start("file", str(src), str(output), "tiny")
+                self.assertTrue(transcribing.wait(3))
+                engine.stop()
+                self.assertEqual(engine.status()["state"], "stopping")
+                release_transcription.set()
+                self.assertTrue(writing.wait(3))
+
+                def request_cancel():
+                    cancel_responses.append(engine.cancel_buffered_audio())
+                    cancel_returned.set()
+
+                cancel_thread = threading.Thread(target=request_cancel)
+                cancel_thread.start()
+                self.assertTrue(engine.cancel_event.wait(1))
+                self.assertFalse(cancel_returned.is_set())
+                release_write.set()
+                cancel_thread.join(3)
+                self.assertTrue(cancel_returned.is_set())
+                self.assertTrue(cancel_responses[0]["cancel_requested"])
+                done = wait_for(engine)
+
+            self.assertEqual(done["state"], "cancelled")
+            self.assertEqual(chunk_lengths, [30 * app.RATE])
+            self.assertEqual(done["processed_seconds"], 30.0)
+            self.assertEqual(done["backlog_seconds"], 1.0)
+            self.assertEqual(output.read_text(), "[00:00:00] finished chunk\n")
+
+    def test_live_cancel_observes_four_and_eight_second_chunk_boundaries(self):
+        for chunk_seconds in (4, 8):
+            with self.subTest(chunk_seconds=chunk_seconds), tempfile.TemporaryDirectory() as directory:
+                entered, release = threading.Event(), threading.Event()
+                chunk_lengths = []
+
+                class SlowModel:
+                    def transcribe(self, audio, **kwargs):
+                        chunk_lengths.append(len(audio))
+                        entered.set()
+                        release.wait(3)
+                        return iter([type("Segment", (), {"text": " live chunk"})()]), None
+
+                src = Path(directory) / "speech.wav"
+                output = Path(directory) / "partial-live.txt"
+                with wave.open(str(src), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(app.RATE)
+                    wav.writeframes(b"\xff\x3f" * (2 * chunk_seconds * app.RATE))
+                command = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src),
+                    "-vn", "-ac", "1", "-ar", str(app.RATE), "-f", "s16le", "pipe:1",
+                ]
+                engine = app.Transcriber()
+                with (
+                    patch.object(app, "devices", return_value=[{"id": "monitor", "label": "Monitor"}]),
+                    patch.object(app, "capture_command", return_value=command),
+                    patch.object(app, "load_model", return_value=SlowModel()),
+                ):
+                    engine.start(
+                        "live", "monitor", str(output), "tiny",
+                        live_chunk_seconds=chunk_seconds,
+                    )
+                    self.assertTrue(entered.wait(3))
+                    engine.stop()
+                    cancel_status = engine.cancel_buffered_audio()
+                    self.assertTrue(cancel_status["cancel_requested"])
+                    release.set()
+                    done = wait_for(engine)
+
+                self.assertEqual(done["state"], "cancelled")
+                self.assertEqual(chunk_lengths, [chunk_seconds * app.RATE])
+                self.assertEqual(done["processed_seconds"], float(chunk_seconds))
+                self.assertEqual(output.read_text(), "[00:00:00] live chunk\n")
 
     def test_recent_lines_match_last_ten_written_lines_and_reset_on_start(self):
         class NumberedModel:
