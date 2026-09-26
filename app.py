@@ -152,6 +152,7 @@ class Transcriber:
         self.input_source = ""
         self.source_title = ""
         self.transcript_source = ""
+        self.captions_automatic = False
         self.transcript_language = ""
         self.import_phase = None
         self.import_downloaded_bytes = 0
@@ -180,6 +181,7 @@ class Transcriber:
                     "model_download_eta_seconds": self.model_download_eta_seconds,
                     "input_source": self.input_source, "source_title": self.source_title,
                     "transcript_source": self.transcript_source,
+                    "captions_automatic": self.captions_automatic,
                     "transcript_language": self.transcript_language,
                     "import_phase": self.import_phase,
                     "import_downloaded_bytes": self.import_downloaded_bytes,
@@ -276,6 +278,7 @@ class Transcriber:
         self.input_source = input_source
         self.source_title = ""
         self.transcript_source = "whisper" if input_source == "file" else ""
+        self.captions_automatic = False
         self.transcript_language = ""
         self.import_phase = None
         self.import_downloaded_bytes = self.import_total_bytes = 0
@@ -321,12 +324,14 @@ class Transcriber:
                                                      remove_source, live_chunk_seconds, language), daemon=True).start()
 
     def start_youtube(self, url: str, output: str | None, model: str,
-                      language: str | None = None) -> None:
+                      language: str | None = None, automatic_captions: bool = True) -> None:
         canonical_url = normalize_youtube_url(url)
         if model not in MODELS:
             raise ValueError("Unknown model")
         if language not in (None, "de", "en"):
             raise ValueError("Language must be de or en")
+        if not isinstance(automatic_captions, bool):
+            raise ValueError("Automatic captions must be true or false")
         with self.lock:
             if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading", "importing"):
                 raise ValueError("A transcription or model load is already in progress")
@@ -335,7 +340,8 @@ class Transcriber:
             self.import_phase = "checking_transcript"
             output_path = self.output
             threading.Thread(target=self._run_youtube, args=(canonical_url, output_path, model,
-                                                             language, stop), daemon=True).start()
+                                                             language, automatic_captions,
+                                                             stop), daemon=True).start()
 
     def _youtube_progress(self, phase: str, done: int, total: int) -> None:
         with self.lock:
@@ -343,27 +349,29 @@ class Transcriber:
             self.import_downloaded_bytes = done
             self.import_total_bytes = total
 
-    def _run_youtube(self, url: str, output: str, model: str,
-                     language: str | None, stop: threading.Event) -> None:
+    def _run_youtube(self, url: str, output: str, model: str, language: str | None,
+                     automatic_captions: bool, stop: threading.Event) -> None:
         imported = None
         handed_off = False
         completed = False
         try:
-            imported = import_youtube(url, language, stop, self._youtube_progress)
+            imported = import_youtube(url, language, stop, self._youtube_progress,
+                                      automatic_captions=automatic_captions)
             with self.lock:
                 self.source_title = imported.title
                 if stop.is_set():
                     raise YouTubeImportCancelled("YouTube import cancelled")
                 if imported.captions:
-                    lines = transcript_lines(imported.captions)
+                    lines = transcript_lines(imported.captions, rolling=imported.caption_automatic)
                     if not lines:
-                        raise RuntimeError("The public captions did not contain transcript text")
+                        raise RuntimeError("The caption track did not contain transcript text")
                     with open(self.output, "a", encoding="utf-8") as transcript:
                         transcript.write("\n".join(lines) + "\n")
                     self.lines = len(lines)
                     self.recent_lines.extend(lines[-10:])
                     self.captured_seconds = self.processed_seconds = round(imported.duration, 1)
                     self.transcript_source = "youtube_captions"
+                    self.captions_automatic = imported.caption_automatic
                     self.transcript_language = imported.caption_language or ""
                     self.import_phase = None
                     self.state = "finished"

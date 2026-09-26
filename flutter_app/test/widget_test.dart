@@ -124,7 +124,30 @@ void main() {
     expect(backend.commands, contains('start_youtube'));
     expect(backend.lastYoutubeArgs?['url'], 'https://youtu.be/mjQlZrteMIY');
     expect(backend.lastYoutubeArgs?['language'], 'de');
+    expect(backend.lastYoutubeArgs?['automatic_captions'], true);
     expect(find.text('Importing YouTube video'), findsOneWidget);
+  });
+
+  testWidgets('captions checkbox disables the automatic-caption fallback', (
+    tester,
+  ) async {
+    final backend = FakeBackend();
+    await tester.pumpWidget(LiveWhisperApp(client: backend));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+    final field = find.byKey(const Key('youtube-url-field'));
+    await tester.ensureVisible(field);
+    await tester.enterText(field, 'https://youtu.be/mjQlZrteMIY');
+    await tester.pump();
+    final toggle = find.byKey(const Key('youtube-captions-checkbox'));
+    await tester.ensureVisible(toggle);
+    await tester.pump();
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(find.text('Check captions & transcribe'), findsOneWidget);
+    await tester.tap(find.text('Check captions & transcribe'));
+    await tester.pump();
+    expect(backend.lastYoutubeArgs?['automatic_captions'], false);
   });
 
   testWidgets('pre-load button warms selected model before capture', (

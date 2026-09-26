@@ -79,6 +79,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String _model = 'base';
   String _language = 'de';
   bool _languageReady = false;
+  bool _automaticCaptions = true;
   int _liveChunkSeconds = 4;
   String? _error;
   bool _pending = false;
@@ -251,14 +252,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _status['input_source'] == 'youtube' &&
         _status['transcript_source'] != 'whisper' &&
         (state == 'importing' || state == 'stopping');
+    final captionsAutomatic = _status['captions_automatic'] == true;
+    final captionKind = captionsAutomatic ? 'automatic captions' : 'manual captions';
     final importText = importPhase == 'checking_transcript'
-        ? 'Checking for a full public transcript before downloading audio…'
+        ? 'Checking for a caption track before downloading audio…'
         : importPhase == 'using_captions'
-        ? 'Using public captions; Whisper transcription skipped.'
+        ? 'Using YouTube captions; Whisper transcription skipped.'
         : importPhase == 'downloading_audio' && importTotal > 0
-        ? 'No full public transcript found · downloading audio ${(100 * importDone / importTotal).clamp(0, 100).toStringAsFixed(0)}% · ${(importDone / 1048576).toStringAsFixed(1)} / ${(importTotal / 1048576).toStringAsFixed(1)} MiB'
+        ? 'Downloading audio ${(100 * importDone / importTotal).clamp(0, 100).toStringAsFixed(0)}% · ${(importDone / 1048576).toStringAsFixed(1)} / ${(importTotal / 1048576).toStringAsFixed(1)} MiB'
         : importPhase == 'downloading_audio'
-        ? 'No full public transcript found · downloading audio…'
+        ? 'Downloading audio…'
         : importPhase == 'preparing_audio'
         ? 'Audio downloaded · starting local Whisper transcription…'
         : 'Importing YouTube video…';
@@ -290,7 +293,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         : youtubeImportInProgress
         ? 'Stopping YouTube import…'
         : _status['transcript_source'] == 'youtube_captions'
-        ? 'Completed from public captions$captionLanguageText · Whisper was skipped'
+        ? 'Completed from $captionKind$captionLanguageText · Whisper was skipped'
         : switch (modelPhase) {
             'downloading' => downloadText,
             'initializing' =>
@@ -405,7 +408,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                           : _status['input_source'] == 'youtube' &&
                                 _status['transcript_source'] ==
                                     'youtube_captions'
-                          ? '$lines transcript lines · full public captions$captionLanguageText used · Whisper skipped'
+                          ? '$lines transcript lines · $captionKind$captionLanguageText used · Whisper skipped'
                           : '$lines transcript lines  ·  ${captured}s captured  ·  ${_status['audio_detected'] == true ? 'Audio detected' : 'Waiting for audio'}',
                       style: Theme.of(context).textTheme.bodyLarge,
                     ),
@@ -784,7 +787,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Checks for a complete public caption track first. If found, it is used directly; otherwise the audio is downloaded and transcribed locally.',
+                      'Creator-written captions are always used when the video has them. Without them, the audio is downloaded and transcribed locally — unless the option below is enabled.',
                     ),
                     const SizedBox(height: 12),
                     TextField(
@@ -797,6 +800,22 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
+                    CheckboxListTile(
+                      key: const Key('youtube-captions-checkbox'),
+                      value: _automaticCaptions,
+                      onChanged: _busy || _pending || !_languageReady
+                          ? null
+                          : (value) =>
+                                setState(() => _automaticCaptions = value ?? false),
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: const Text("Use YouTube's automatic captions"),
+                      subtitle: const Text(
+                        'Manual captions are always used. When ticked, automatic captions are used if there are none; untick to transcribe the downloaded audio with the selected model instead.',
+                        style: TextStyle(color: Color(0xffadb8ca)),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
                     FilledButton.icon(
                       onPressed:
                           _busy ||
@@ -809,6 +828,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                               'model': _model,
                               'language': _language,
                               'output': _output.text,
+                              'automatic_captions': _automaticCaptions,
                             }),
                       icon: const Icon(Icons.subtitles_outlined),
                       label: const Text('Check captions & transcribe'),

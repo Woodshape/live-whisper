@@ -116,6 +116,31 @@ class TranscriberTests(unittest.TestCase):
                 "[00:00:00] Caption one\n[00:00:30] Caption two\n",
             )
 
+    def test_youtube_automatic_captions_are_merged_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "captions.txt"
+            captions = (
+                CaptionCue(0, 2, "I have so much content"),
+                CaptionCue(2, 4, "I have so much content on my channel"),
+            )
+            engine = app.Transcriber()
+            imported = YouTubeImport("Example video", 40, captions, "en-orig",
+                                     caption_automatic=True)
+            with (
+                patch.object(app, "import_youtube", return_value=imported) as importer,
+                patch.object(app, "load_model") as load_model,
+            ):
+                engine.start_youtube("https://youtu.be/mjQlZrteMIY", str(output), "tiny", "en",
+                                     automatic_captions=True)
+                status = wait_for(engine)
+            self.assertTrue(importer.call_args.kwargs["automatic_captions"])
+            load_model.assert_not_called()
+            self.assertEqual(status["state"], "finished")
+            self.assertTrue(status["captions_automatic"])
+            self.assertEqual(status["transcript_language"], "en-orig")
+            self.assertEqual(output.read_text(),
+                             "[00:00:00] I have so much content on my channel\n")
+
     def test_youtube_audio_fallback_uses_whisper_and_removes_download(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "audio.wav"
@@ -169,10 +194,50 @@ class TranscriberTests(unittest.TestCase):
                         self.assertEqual(status["language"], expected)
                         self.assertEqual(options_seen[-1], expected)
 
+    def test_youtube_import_can_skip_automatic_captions_and_use_whisper(self):
+        entered, release = threading.Event(), threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "audio.wav"
+            with wave.open(str(source), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            output = Path(directory) / "youtube.txt"
+            engine = app.Transcriber()
+            imported = YouTubeImport("Example video", 1, audio_path=source, spoken_language="en")
+
+            def blocked_import(*args, **kwargs):
+                entered.set()
+                release.wait(3)
+                return imported
+
+            with (
+                patch.object(app, "import_youtube", side_effect=blocked_import) as importer,
+                patch.object(app, "load_model", return_value=FakeModel()),
+            ):
+                engine.start_youtube("https://youtu.be/mjQlZrteMIY", str(output), "tiny", "de",
+                                     automatic_captions=False)
+                self.assertTrue(entered.wait(3))
+                self.assertEqual(engine.status()["import_phase"], "checking_transcript")
+                release.set()
+                status = wait_for(engine)
+            self.assertFalse(importer.call_args.kwargs["automatic_captions"])
+            self.assertEqual(status["state"], "finished")
+            self.assertEqual(status["transcript_source"], "whisper")
+            self.assertIn("hello world", output.read_text())
+
+    def test_youtube_automatic_captions_toggle_must_be_boolean(self):
+        engine = app.Transcriber()
+        with self.assertRaisesRegex(ValueError, "Automatic captions"):
+            engine.start_youtube("https://youtu.be/mjQlZrteMIY", "/tmp/out.txt", "tiny", "en",
+                                 automatic_captions="yes")
+        self.assertEqual(engine.status()["state"], "idle")
+
     def test_stop_during_youtube_import_waits_for_import_worker_and_cancels(self):
         entered, release = threading.Event(), threading.Event()
 
-        def blocked_import(*args):
+        def blocked_import(*args, **kwargs):
             entered.set()
             release.wait(3)
             raise YouTubeImportCancelled("YouTube import cancelled")

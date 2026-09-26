@@ -9,6 +9,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -33,7 +34,14 @@ class YouTubeImport:
     captions: tuple[CaptionCue, ...] = ()
     caption_language: str | None = None
     spoken_language: str | None = None
+    caption_automatic: bool = False
     audio_path: Path | None = None
+
+
+class CaptionTrack(NamedTuple):
+    language: str
+    format: dict
+    automatic: bool
 
 
 class YouTubeImportCancelled(Exception):
@@ -122,12 +130,27 @@ def is_full_transcript(cues: tuple[CaptionCue, ...], duration: float) -> bool:
     return first <= min(30.0, duration * 0.05) and last >= duration - min(60.0, duration * 0.05)
 
 
-def transcript_lines(cues: tuple[CaptionCue, ...], group_seconds: int = 30) -> list[str]:
-    """Group timed caption cues into the app's timestamped transcript format."""
+def transcript_lines(cues: tuple[CaptionCue, ...], group_seconds: int = 30,
+                     rolling: bool = False) -> list[str]:
+    """Group timed caption cues into the app's timestamped transcript format.
+
+    ``rolling`` merges YouTube's automatic captions, where every cue repeats the
+    previous cue and appends a few words, so the transcript is not triplicated.
+    """
     groups: dict[int, list[str]] = {}
+    accumulated: list[str] = []
     for cue in cues:
         timestamp = int(cue.start // group_seconds) * group_seconds
-        text = cue.text.strip()
+        words = cue.text.split()
+        if rolling:
+            overlap = 0
+            for size in range(min(len(accumulated), len(words)), 0, -1):
+                if accumulated[-size:] == words[:size]:
+                    overlap = size
+                    break
+            words = words[overlap:]
+            accumulated.extend(words)
+        text = " ".join(words)
         if text and (not groups.get(timestamp) or groups[timestamp][-1] != text):
             groups.setdefault(timestamp, []).append(text)
     lines = []
@@ -141,44 +164,49 @@ def _language_base(language: str) -> str:
     return language.lower().split("-", 1)[0]
 
 
-def choose_caption_track(info: dict, preferred_language: str | None) -> tuple[str, dict] | None:
-    """Pick a manual caption track for the video's spoken language, if one exists.
+def choose_caption_track(info: dict, preferred_language: str | None,
+                         allow_automatic: bool = True) -> CaptionTrack | None:
+    """Pick a caption track, preferring creator-written captions over automatic ones.
 
-    YouTube's automatic captions are rolling windows that repeat each previous cue, so
-    they arrive heavily duplicated; without a manual track the app downloads the audio
-    and transcribes it locally instead.
+    Automatic captions are only considered when ``allow_automatic`` is set and no
+    manual track exists; their cues repeat each previous cue, so callers must merge
+    them with :func:`transcript_lines` (``rolling=True``).
     """
     original = info.get("language")
     original_base = _language_base(original) if isinstance(original, str) and original else None
     preferred_base = _language_base(preferred_language) if preferred_language else None
-    tracks = info.get("subtitles") or {}
-    if not isinstance(tracks, dict):
-        return None
-    candidates: list[tuple[tuple[int, int], str, dict]] = []
-    for language, formats in tracks.items():
-        if not isinstance(language, str) or not isinstance(formats, list):
+    sources = [("subtitles", False)] + ([] if not allow_automatic else [("automatic_captions", True)])
+    candidates: list[tuple[tuple[int, int, int, int], str, dict, bool]] = []
+    for source_rank, (source, automatic) in enumerate(sources):
+        tracks = info.get(source) or {}
+        if not isinstance(tracks, dict):
             continue
-        formats = [item for item in formats if isinstance(item, dict)]
-        base = _language_base(language)
-        if original_base and base == original_base:
-            language_rank = 0
-        elif preferred_base and base == preferred_base:
-            language_rank = 1 if original_base else 0
-        elif base == "en":
-            language_rank = 2
-        else:
-            language_rank = 3
-        format_entry = next((item for item in formats if item.get("ext") == "vtt"), None)
-        if format_entry is None:
-            format_entry = next((item for item in formats if item.get("ext") == "srt"), None)
-        if format_entry is None or not format_entry.get("url"):
-            continue
-        rank = (language_rank, 0 if format_entry.get("ext") == "vtt" else 1)
-        candidates.append((rank, language, format_entry))
+        for language, formats in tracks.items():
+            if not isinstance(language, str) or not isinstance(formats, list):
+                continue
+            formats = [item for item in formats if isinstance(item, dict)]
+            base = _language_base(language)
+            if original_base and base == original_base:
+                language_rank = 0
+            elif preferred_base and base == preferred_base:
+                language_rank = 1 if original_base else 0
+            elif base == "en":
+                language_rank = 2
+            else:
+                language_rank = 3
+            format_entry = next((item for item in formats if item.get("ext") == "vtt"), None)
+            if format_entry is None:
+                format_entry = next((item for item in formats if item.get("ext") == "srt"), None)
+            if format_entry is None or not format_entry.get("url"):
+                continue
+            rank = (source_rank, language_rank,
+                    0 if language.lower().endswith("-orig") else 1,
+                    0 if format_entry.get("ext") == "vtt" else 1)
+            candidates.append((rank, language, format_entry, automatic))
     if not candidates:
         return None
-    _, language, entry = min(candidates, key=lambda candidate: candidate[0])
-    return language, entry
+    _, language, entry, automatic = min(candidates, key=lambda candidate: candidate[0])
+    return CaptionTrack(language, entry, automatic)
 
 
 def import_youtube(
@@ -186,8 +214,13 @@ def import_youtube(
     language: str | None,
     stop_event: threading.Event,
     progress,
+    automatic_captions: bool = True,
 ) -> YouTubeImport:
-    """Use a complete manual caption track when one exists; otherwise fetch the audio."""
+    """Use a creator-written caption track when one exists, otherwise fetch the audio.
+
+    Creator-written captions always win. ``automatic_captions=False`` skips YouTube's
+    automatic captions as well, so those videos are transcribed locally.
+    """
     canonical_url = normalize_youtube_url(url)
     video_id = canonical_url.rsplit("=", 1)[-1]
     try:
@@ -240,9 +273,9 @@ def import_youtube(
             title = str(info.get("title") or video_id)
             spoken_language = video_language(info)
 
-            track = choose_caption_track(info, language)
+            track = choose_caption_track(info, language, allow_automatic=automatic_captions)
             if track:
-                caption_language, caption_format = track
+                caption_language, caption_format = track.language, track.format
                 try:
                     response = ydl.urlopen(caption_format["url"])
                     data = bytearray()
@@ -261,7 +294,8 @@ def import_youtube(
                     if is_full_transcript(captions, duration):
                         progress("using_captions", 0, 0)
                         return YouTubeImport(title, duration, captions, caption_language,
-                                             spoken_language=spoken_language)
+                                             spoken_language=spoken_language,
+                                             caption_automatic=track.automatic)
                 except YouTubeImportCancelled:
                     raise
                 except Exception:

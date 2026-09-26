@@ -39,6 +39,15 @@ class BackendTests(unittest.TestCase):
             engine.start_youtube.assert_called_once_with(
                 'https://youtu.be/mjQlZrteMIY', '/tmp/transcript.txt', 'base', language='en')
 
+    def test_desktop_youtube_automatic_captions_toggle_is_forwarded(self):
+        with patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            backend.handle(engine, {'command': 'start_youtube',
+                                   'url': 'https://youtu.be/mjQlZrteMIY',
+                                   'model': 'base', 'automatic_captions': False})
+            engine.start_youtube.assert_called_once_with(
+                'https://youtu.be/mjQlZrteMIY', None, 'base', automatic_captions=False)
+
     def test_preload_model_command(self):
         with patch.object(backend, 'Transcriber') as mocked:
             engine = mocked.return_value
