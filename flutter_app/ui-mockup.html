@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Whisper — current UI mockup</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #11141c;
+      --surface: #1d2330;
+      --transcript: #141b27;
+      --text: #eef1f8;
+      --muted: #adb8ca;
+      --accent: #a8b5ff;
+      --accent-strong: #98a7ff;
+      --success: #9fe4c2;
+      --outline: #657086;
+      --disabled: #788196;
+      font-family: Roboto, "Noto Sans", Arial, sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--background);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    button, input, select { font: inherit; }
+
+    .page {
+      width: 100%;
+      max-width: 840px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .brand {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 3px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(27px, 4vw, 32px);
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: -0.45px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-top: 20px;
+      padding: 4px;
+      border-radius: 999px;
+      background: #171c27;
+      width: fit-content;
+      max-width: 100%;
+    }
+
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 18px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: .15px;
+      cursor: pointer;
+    }
+
+    .tab svg { width: 18px; height: 18px; }
+
+    .tab[aria-selected="true"] {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+    }
+
+    .tab:hover:not([aria-selected="true"]) { color: var(--text); }
+
+    .panel { display: none; }
+    .panel.is-active { display: block; }
+
+    .cards { display: grid; gap: 18px; margin-top: 18px; }
+
+    .card {
+      min-width: 0;
+      padding: 24px;
+      border-radius: 20px;
+      background: var(--surface);
+    }
+
+    .status-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 40px;
+    }
+
+    .status-dot {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 13px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .status-dot.recording {
+      background: #ff8a80;
+      box-shadow: 0 0 0 0 rgba(255, 138, 128, 0.55);
+      animation: pulse-dot 1.4s ease-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      70% { box-shadow: 0 0 0 8px rgba(255, 138, 128, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 138, 128, 0); }
+    }
+
+    .status-title {
+      margin: 0;
+      flex: 1;
+      min-width: 0;
+      color: var(--success);
+      font-size: 22px;
+      line-height: 1.3;
+      font-weight: 700;
+    }
+
+    .status-title.recording { color: #ffb4ac; }
+
+    .status-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+
+    .status-actions .button {
+      min-width: 96px;
+    }
+
+    .status-summary {
+      margin: 16px 0 0;
+      font-size: 16px;
+    }
+
+    .output-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
+      margin-top: 10px;
+    }
+
+    .output-path {
+      display: block;
+      flex: 1;
+      min-width: 0;
+      margin-top: 8px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .output-pick {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      flex: 0 0 36px;
+      place-items: center;
+      margin-top: 2px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .output-pick:hover { color: var(--accent); background: rgba(168, 181, 255, 0.08); }
+    .output-pick svg { width: 18px; height: 18px; }
+
+    .divider {
+      height: 1px;
+      margin: 14.5px 0;
+      border: 0;
+      background: #3b4353;
+    }
+
+    .divider.long { margin: 17.5px 0; }
+
+    .speed {
+      margin: -5px 0 0;
+      color: #c4cdff;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .transcript-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .transcript-head h3 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .transcript-icon { color: var(--accent); width: 20px; height: 20px; }
+    .newest { margin-left: auto; color: var(--muted); }
+
+    .empty-transcript {
+      margin-top: 10px;
+      color: var(--muted);
+    }
+
+    .section-title {
+      margin: 0 0 16px;
+      font-size: 22px;
+      line-height: 1.3;
+      font-weight: 600;
+    }
+
+    .section-intro { margin: -8px 0 16px; }
+    .supporting { margin: 6px 0 0; color: var(--muted); }
+
+    .field {
+      position: relative;
+      display: block;
+      min-width: 0;
+      width: 100%;
+      height: 56px;
+      padding: 0 14px;
+      border: 1px solid var(--outline);
+      border-radius: 4px;
+      outline: none;
+      background: transparent;
+      color: var(--text);
+    }
+
+    .field:focus { border: 2px solid var(--accent); padding-left: 13px; }
+    .field::placeholder { color: transparent; opacity: 1; }
+    .field:focus::placeholder { color: #9da8bb; }
+
+    .field-wrap, .select-wrap { position: relative; }
+    .field-wrap .field { padding-right: 54px; }
+    .text-input-wrap .field { padding-right: 14px; }
+
+    .overlay-label, .select-label {
+      position: absolute;
+      z-index: 1;
+      left: 12px;
+      padding: 0 4px;
+      background: var(--surface);
+      color: #b9c3d5;
+      font-size: 12px;
+      letter-spacing: .15px;
+      pointer-events: none;
+      transition: top .12s ease, transform .12s ease;
+    }
+
+    .overlay-label {
+      top: 50%;
+      transform: translateY(-50%);
+      left: 14px;
+      padding: 0;
+      background: transparent;
+      font-size: 14px;
+    }
+
+    .field-wrap:focus-within .overlay-label {
+      top: -7px;
+      left: 10px;
+      padding: 0 4px;
+      transform: none;
+      background: var(--surface);
+      font-size: 12px;
+    }
+
+    .select-label { top: -7px; }
+
+    .button svg { width: 18px; height: 18px; }
+
+    .button {
+      display: inline-flex;
+      min-height: 40px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 18px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: var(--accent-strong);
+      color: #151a2b;
+      font-weight: 600;
+      letter-spacing: .15px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .button:hover:not(:disabled) { filter: brightness(1.08); }
+    .button:disabled { opacity: .38; cursor: default; }
+
+    .button.outlined {
+      border-color: var(--outline);
+      background: transparent;
+      color: var(--accent);
+    }
+
+    .button.outlined:disabled { color: var(--disabled); }
+    .control-stack { display: grid; gap: 12px; }
+    .language-note { margin-top: -4px; }
+    .preload-row { margin-top: 12px; }
+
+    .live-preset-note { margin-top: 8px; }
+    .device-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 44px;
+      align-items: end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .device-row .field { padding-right: 38px; }
+
+    .refresh-button {
+      display: grid;
+      width: 44px;
+      height: 56px;
+      place-items: center;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .refresh-button svg { width: 20px; height: 20px; }
+
+    .file-button { margin-top: 12px; }
+    .file-start { margin-top: 8px; }
+
+    .check-row {
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr);
+      align-items: start;
+      gap: 12px;
+      margin: 8px 0 4px;
+      padding: 0;
+    }
+
+    .check-row input {
+      width: 18px;
+      height: 18px;
+      margin: 3px 0 0;
+      accent-color: var(--accent-strong);
+    }
+
+    .check-title { display: block; font-size: 14px; }
+    .check-note { display: block; margin-top: 2px; color: var(--muted); }
+    .youtube-start { margin-top: 4px; }
+    .legal-note { margin-top: 8px; }
+
+    .footer {
+      margin: 20px 0 0;
+      color: #aab4c4;
+      text-align: center;
+    }
+
+    @media (max-width: 560px) {
+      .page { padding: 20px 16px; }
+      .card { padding: 20px; }
+      .section-title, .status-title { font-size: 20px; }
+      .button { white-space: normal; text-align: center; }
+      .status-head {
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+      .status-actions {
+        width: 100%;
+        justify-content: stretch;
+        margin-top: 4px;
+      }
+      .status-actions .button { flex: 1; }
+      .tabs { width: 100%; }
+      .tab { flex: 1; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <p class="brand">LIVE WHISPER</p>
+    <h1>Your words, captured locally.</h1>
+
+    <div class="tabs" role="tablist" aria-label="Main sections">
+      <button class="tab" id="tab-capture" type="button" role="tab" aria-selected="true" aria-controls="panel-capture">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.8"/>
+          <circle cx="12" cy="12" r="3" fill="currentColor"/>
+        </svg>
+        Capture
+      </button>
+      <button class="tab" id="tab-settings" type="button" role="tab" aria-selected="false" aria-controls="panel-settings">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Z" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M19.2 12.8v-1.6l-1.7-.4a5.8 5.8 0 0 0-.5-1.1l1-1.4-1.1-1.1-1.4 1a5.8 5.8 0 0 0-1.1-.5L13.6 4.8h-1.6l-.4 1.7a5.8 5.8 0 0 0-1.1.5l-1.4-1-1.1 1.1 1 1.4a5.8 5.8 0 0 0-.5 1.1l-1.7.4v1.6l1.7.4c.1.4.3.8.5 1.1l-1 1.4 1.1 1.1 1.4-1c.3.2.7.4 1.1.5l.4 1.7h1.6l.4-1.7c.4-.1.8-.3 1.1-.5l1.4 1 1.1-1.1-1-1.4c.2-.3.4-.7.5-1.1l1.7-.4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        Settings
+      </button>
+    </div>
+
+    <div class="panel is-active" id="panel-capture" role="tabpanel" aria-labelledby="tab-capture">
+      <div class="cards">
+        <section class="card" aria-labelledby="status-heading">
+          <div class="status-head">
+            <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+            <h2 class="status-title" id="status-heading">Idle</h2>
+            <div class="status-actions">
+              <button class="button" id="quick-start" type="button">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.8"/>
+                  <circle cx="12" cy="12" r="3" fill="currentColor"/>
+                </svg>
+                Start
+              </button>
+              <button class="button outlined" id="quick-stop" type="button" disabled>
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="12" cy="12" r="7.25" stroke="currentColor" stroke-width="1.7"/>
+                  <rect x="8.5" y="8.5" width="7" height="7" rx="1" fill="currentColor"/>
+                </svg>
+                Stop
+              </button>
+            </div>
+          </div>
+          <p class="status-summary" id="status-summary">0 transcript lines&nbsp; · &nbsp;0s captured&nbsp; · &nbsp;Waiting for audio</p>
+          <div class="output-row">
+            <span class="output-path" id="output-path">Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)</span>
+            <button class="output-pick" id="output-pick" type="button" aria-label="Choose output file" title="Choose output file">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M3.5 6.5h6l2 2h9v10.5h-17V6.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M3.5 9h17" stroke="currentColor" stroke-width="1.7"/>
+              </svg>
+            </button>
+          </div>
+          <div class="preload-row">
+            <button class="button outlined" id="preload-model" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 3.5v3M12 17.5v3M4.6 6.1l2.1 2.1m10.6 7.6 2.1 2.1M3.5 12h3m11 0h3M4.6 17.9l2.1-2.1m10.6-7.6 2.1-2.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                <circle cx="12" cy="12" r="3.7" stroke="currentColor" stroke-width="1.7"/>
+              </svg>
+              <span id="preload-label">Pre-load model</span>
+            </button>
+          </div>
+          <hr class="divider">
+          <p class="speed" id="status-speed">Transcription speed: available after speech is processed</p>
+          <hr class="divider long">
+          <div class="transcript-head">
+            <svg class="transcript-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M4 5.5h16M4 10h16M4 14.5h11M4 19h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <h3>Recent transcript</h3>
+            <span class="newest">Newest first</span>
+          </div>
+          <div class="empty-transcript">Transcribed lines will appear here.</div>
+        </section>
+
+        <section class="card" aria-labelledby="recording-heading">
+          <h2 class="section-title" id="recording-heading">Existing recording</h2>
+          <p class="section-intro">Process an audio or video file in the background, without playing it.</p>
+          <button class="button outlined file-button" type="button">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M4.5 4.5h10l5 5v10h-15v-15Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M14.5 4.5v5h5M9 13v5m0-5 4 2.5-4 2.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Choose audio / video
+          </button>
+          <div class="file-start">
+            <button class="button" type="button" disabled>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="m9 5 10 7-10 7V5Z" fill="currentColor"/>
+              </svg>
+              Transcribe file
+            </button>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="youtube-heading">
+          <h2 class="section-title" id="youtube-heading">YouTube video</h2>
+          <p class="section-intro">Creator-written captions are always used when the video has them. Without them, the audio is downloaded and transcribed locally — unless the option below is enabled.</p>
+          <div class="field-wrap text-input-wrap">
+            <input class="field" id="youtube-url" type="url" aria-label="YouTube video URL" placeholder="https://www.youtube.com/watch?v=…">
+            <span class="overlay-label">YouTube video URL</span>
+          </div>
+          <label class="check-row">
+            <input type="checkbox" id="automatic-captions" checked>
+            <span>
+              <span class="check-title">Use YouTube's automatic captions</span>
+              <span class="check-note">Manual captions are always used. When ticked, automatic captions are used if there are none; untick to transcribe the downloaded audio with the selected model instead.</span>
+            </span>
+          </label>
+          <div class="youtube-start">
+            <button class="button" id="youtube-submit" type="button" disabled>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5 5.5h14v13H5v-13ZM8 9h8M8 12h8M8 15h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Check captions &amp; transcribe
+            </button>
+          </div>
+          <p class="supporting legal-note">Requires internet access. Use videos you are authorized to process; downloads are subject to YouTube availability and terms.</p>
+        </section>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <div class="cards">
+        <section class="card" aria-labelledby="model-heading">
+          <h2 class="section-title" id="model-heading">Model</h2>
+          <div class="control-stack">
+            <label class="select-wrap">
+              <span class="select-label">Whisper model</span>
+              <select class="field" aria-label="Whisper model">
+                <option>tiny</option>
+                <option selected>base</option>
+                <option>small</option>
+                <option>medium</option>
+                <option>large-v3</option>
+              </select>
+            </label>
+            <label class="select-wrap">
+              <span class="select-label">Language / Sprache</span>
+              <select class="field" aria-label="Language / Sprache">
+                <option selected>Deutsch (de)</option>
+                <option>English (en)</option>
+              </select>
+            </label>
+            <p class="supporting language-note">Fixed for each session; saved for the next app launch. Select the main spoken language.</p>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="live-heading">
+          <h2 class="section-title" id="live-heading">Live audio</h2>
+          <p class="section-intro">Choose the default system-audio monitor, a microphone, or BlackHole on macOS. Used when you press Start on Capture.</p>
+          <label class="select-wrap">
+            <span class="select-label">Latency / accuracy</span>
+            <select class="field" aria-label="Latency / accuracy">
+              <option selected>Low latency · 4s</option>
+              <option>Higher accuracy · 8s</option>
+            </select>
+          </label>
+          <p class="supporting live-preset-note">4s responds sooner but may miss words at chunk boundaries or fall behind. 8s gives Whisper more context and throughput.</p>
+          <div class="device-row">
+            <label class="select-wrap">
+              <span class="select-label">Audio source</span>
+              <select class="field" aria-label="Audio source">
+                <option selected>Default system audio</option>
+                <option>System audio: other monitor</option>
+                <option>Microphone</option>
+              </select>
+            </label>
+            <button class="refresh-button" type="button" aria-label="Refresh devices" title="Refresh devices">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M20 7v5h-5M4.7 9A7.5 7.5 0 0 1 18 6.5L20 9M4 17v-5h5m10.3 3A7.5 7.5 0 0 1 6 17.5L4 15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <p class="footer">Audio stays on this computer. Models download once; transcription then runs locally.</p>
+  </main>
+  <script>
+    const urlField = document.getElementById('youtube-url');
+    const submit = document.getElementById('youtube-submit');
+    urlField.addEventListener('input', () => {
+      submit.disabled = urlField.value.trim().length === 0;
+    });
+
+    const tabs = {
+      capture: {
+        tab: document.getElementById('tab-capture'),
+        panel: document.getElementById('panel-capture'),
+      },
+      settings: {
+        tab: document.getElementById('tab-settings'),
+        panel: document.getElementById('panel-settings'),
+      },
+    };
+
+    function showPanel(name) {
+      for (const [key, entry] of Object.entries(tabs)) {
+        const selected = key === name;
+        entry.tab.setAttribute('aria-selected', String(selected));
+        entry.panel.classList.toggle('is-active', selected);
+        entry.panel.hidden = !selected;
+      }
+    }
+
+    tabs.capture.tab.addEventListener('click', () => showPanel('capture'));
+    tabs.settings.tab.addEventListener('click', () => showPanel('settings'));
+
+    // Status-card Start/Stop: quick live transcription toggle for the mockup.
+    const statusDot = document.getElementById('status-dot');
+    const statusHeading = document.getElementById('status-heading');
+    const statusSummary = document.getElementById('status-summary');
+    const statusSpeed = document.getElementById('status-speed');
+    const quickStart = document.getElementById('quick-start');
+    const quickStop = document.getElementById('quick-stop');
+    let recording = false;
+
+    function setRecording(next) {
+      recording = next;
+      statusDot.classList.toggle('recording', recording);
+      statusHeading.classList.toggle('recording', recording);
+      statusHeading.textContent = recording ? 'Listening' : 'Idle';
+      statusSummary.innerHTML = recording
+        ? '0 transcript lines&nbsp; · &nbsp;12s captured&nbsp; · &nbsp;Audio detected'
+        : '0 transcript lines&nbsp; · &nbsp;0s captured&nbsp; · &nbsp;Waiting for audio';
+      statusSpeed.textContent = recording
+        ? 'Transcription speed: 1.4× realtime'
+        : 'Transcription speed: available after speech is processed';
+      quickStart.disabled = recording;
+      quickStop.disabled = !recording;
+    }
+
+    quickStart.addEventListener('click', () => setRecording(true));
+    quickStop.addEventListener('click', () => setRecording(false));
+
+    const outputPath = document.getElementById('output-path');
+    const outputPick = document.getElementById('output-pick');
+    let customOutput = null;
+    outputPick.addEventListener('click', () => {
+      // Mock file picker: cycle automatic ↔ a chosen path.
+      if (customOutput) {
+        customOutput = null;
+        outputPath.textContent = 'Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)';
+      } else {
+        customOutput = '~/Transcripts/live-whisper.txt';
+        outputPath.textContent = customOutput;
+      }
+    });
+
+    const preloadBtn = document.getElementById('preload-model');
+    const preloadLabel = document.getElementById('preload-label');
+    let modelReady = false;
+    preloadBtn.addEventListener('click', () => {
+      if (modelReady || recording) return;
+      preloadBtn.disabled = true;
+      preloadLabel.textContent = 'Pre-loading model…';
+      setTimeout(() => {
+        modelReady = true;
+        preloadLabel.textContent = 'Model ready in memory';
+      }, 700);
+    });
+  </script>
+</body>
+</html>
