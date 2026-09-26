@@ -23,6 +23,9 @@ def handle(engine: Transcriber, message: dict) -> dict:
         engine.start("live", message["source"], message.get("output"), message["model"],
                      live_chunk_seconds=message.get("chunk_seconds", 8),
                      **({"language": message["language"]} if "language" in message else {}))
+    elif command == "start_youtube":
+        engine.start_youtube(message["url"], message.get("output"), message["model"],
+                             **({"language": message["language"]} if "language" in message else {}))
     elif command == "start_file":
         source = Path(message["source"]).expanduser().resolve()
         if not source.is_file():

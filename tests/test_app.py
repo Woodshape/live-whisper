@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
+from youtube_import import CaptionCue, YouTubeImport, YouTubeImportCancelled
 
 
 class FakeModel:
@@ -87,6 +88,81 @@ class TranscriberTests(unittest.TestCase):
                 self.assertEqual(wait_for(engine)["state"], "finished")
             self.assertEqual(dst.read_text(), "existing\n[00:00:00] hello world\n")
             self.assertTrue(src.exists())
+
+    def test_youtube_full_captions_are_written_without_loading_whisper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "captions.txt"
+            captions = (
+                CaptionCue(0, 3, "Caption one"),
+                CaptionCue(35, 40, "Caption two"),
+            )
+            engine = app.Transcriber()
+            imported = YouTubeImport("Example video", 40, captions, "en")
+            with (
+                patch.object(app, "import_youtube", return_value=imported) as importer,
+                patch.object(app, "load_model") as load_model,
+            ):
+                engine.start_youtube("https://youtu.be/mjQlZrteMIY", str(output), "tiny", "en")
+                status = wait_for(engine)
+            importer.assert_called_once()
+            load_model.assert_not_called()
+            self.assertEqual(status["state"], "finished")
+            self.assertEqual(status["input_source"], "youtube")
+            self.assertEqual(status["transcript_source"], "youtube_captions")
+            self.assertEqual(status["transcript_language"], "en")
+            self.assertEqual(status["lines"], 2)
+            self.assertEqual(
+                output.read_text(),
+                "[00:00:00] Caption one\n[00:00:30] Caption two\n",
+            )
+
+    def test_youtube_audio_fallback_uses_whisper_and_removes_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "audio.wav"
+            with wave.open(str(source), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(app.RATE)
+                wav.writeframes(b"\xff\x3f" * app.RATE)
+            output = Path(directory) / "youtube.txt"
+            engine = app.Transcriber()
+            imported = YouTubeImport("Example video", 1, audio_path=source)
+            with (
+                patch.object(app, "import_youtube", return_value=imported),
+                patch.object(app, "load_model", return_value=FakeModel()),
+            ):
+                engine.start_youtube("https://www.youtube.com/watch?v=mjQlZrteMIY",
+                                     str(output), "tiny", "en")
+                status = wait_for(engine)
+            self.assertEqual(status["state"], "finished")
+            self.assertEqual(status["input_source"], "youtube")
+            self.assertEqual(status["transcript_source"], "whisper")
+            self.assertFalse(source.exists())
+            self.assertIn("hello world", output.read_text())
+
+    def test_stop_during_youtube_import_waits_for_import_worker_and_cancels(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def blocked_import(*args):
+            entered.set()
+            release.wait(3)
+            raise YouTubeImportCancelled("YouTube import cancelled")
+
+        engine = app.Transcriber()
+        with patch.object(app, "import_youtube", side_effect=blocked_import):
+            engine.start_youtube("https://youtu.be/mjQlZrteMIY", "/tmp/youtube-stop.txt", "tiny", "en")
+            self.assertTrue(entered.wait(3))
+            engine.stop()
+            self.assertEqual(engine.status()["state"], "stopping")
+            release.set()
+            self.assertEqual(wait_for(engine)["state"], "stopped")
+
+    def test_invalid_youtube_url_is_rejected_before_starting_import(self):
+        engine = app.Transcriber()
+        with self.assertRaisesRegex(ValueError, "YouTube video link"):
+            engine.start_youtube("https://not-youtube.example/watch?v=mjQlZrteMIY",
+                                 "/tmp/should-not-start.txt", "tiny", "en")
+        self.assertEqual(engine.status()["state"], "idle")
 
     def test_language_is_fixed_per_session_even_when_reusing_a_warm_model(self):
         options_seen = []

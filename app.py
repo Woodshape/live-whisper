@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from youtube_import import YouTubeImportCancelled, import_youtube, normalize_youtube_url, transcript_lines
+
 ROOT = Path(__file__).resolve().parent
 RATE = 16_000
 LIVE_SECONDS = 8  # Browser prototype default; desktop sends an explicit preset.
@@ -123,6 +125,13 @@ class Transcriber:
         self.model_download_started = None
         self.recent_chunks = deque(maxlen=5)
         self.audio_detected = False
+        self.input_source = ""
+        self.source_title = ""
+        self.transcript_source = ""
+        self.transcript_language = ""
+        self.import_phase = None
+        self.import_downloaded_bytes = 0
+        self.import_total_bytes = 0
         self.error = ""
         self.stop_event = threading.Event()
         self.proc: subprocess.Popen | None = None
@@ -144,7 +153,13 @@ class Transcriber:
                     if self.model_phase and self.model_load_started is not None else None,
                     "model_download_bytes": self.model_download_bytes,
                     "model_download_total": self.model_download_total,
-                    "model_download_eta_seconds": self.model_download_eta_seconds}
+                    "model_download_eta_seconds": self.model_download_eta_seconds,
+                    "input_source": self.input_source, "source_title": self.source_title,
+                    "transcript_source": self.transcript_source,
+                    "transcript_language": self.transcript_language,
+                    "import_phase": self.import_phase,
+                    "import_downloaded_bytes": self.import_downloaded_bytes,
+                    "import_total_bytes": self.import_total_bytes}
 
     def _model_progress(self, phase: str, done: int, total: int) -> None:
         with self.lock:
@@ -168,7 +183,7 @@ class Transcriber:
         if name not in MODELS:
             raise ValueError("Unknown model")
         with self.lock:
-            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading"):
+            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading", "importing"):
                 raise ValueError("A transcription or model load is already in progress")
             if self.warm_model_name == name and self.warm_model is not None:
                 return
@@ -213,6 +228,37 @@ class Transcriber:
         with self.lock:
             self.output = str(path)
 
+    def _prepare_session_locked(self, mode: str, output: str | None, model: str,
+                                live_chunk_seconds: int, language: str | None,
+                                input_source: str, initial_state: str) -> threading.Event:
+        if output is None or (isinstance(output, str) and not output.strip()):
+            output = default_output_path()
+        self.set_output(output)
+        self.mode, self.model_name, self.lines, self.error = mode, model, 0, ""
+        self.language = language
+        self.live_chunk_seconds = live_chunk_seconds
+        self.recent_lines.clear()
+        self.captured_seconds, self.processed_seconds = 0.0, 0.0
+        self.processing_speed = None
+        if input_source != "youtube" and self.warm_model_name != model:
+            self.warm_model = self.warm_model_name = None
+        self.model_phase = None if input_source == "youtube" or self.warm_model is not None else "checking"
+        self.model_load_started = time.monotonic() if self.model_phase else None
+        self.model_download_started = None
+        self.model_download_bytes = self.model_download_total = 0
+        self.model_download_eta_seconds = None
+        self.recent_chunks.clear()
+        self.audio_detected = False
+        self.input_source = input_source
+        self.source_title = ""
+        self.transcript_source = "whisper" if input_source == "file" else ""
+        self.transcript_language = ""
+        self.import_phase = None
+        self.import_downloaded_bytes = self.import_total_bytes = 0
+        self.stop_event = threading.Event()
+        self.state = initial_state
+        return self.stop_event
+
     def start(self, mode: str, source: str, output: str | None, model: str,
               remove_source: bool = False, live_chunk_seconds: int | None = None,
               language: str | None = None) -> None:
@@ -231,36 +277,99 @@ class Transcriber:
         if mode == "live" and source not in {item["id"] for item in devices()}:
             raise ValueError("Audio source is no longer available; refresh devices")
         with self.lock:
-            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading"):
+            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading", "importing"):
                 raise ValueError("A transcription or model load is already in progress")
             if output is None or (isinstance(output, str) and not output.strip()):
                 output = default_output_path()
             if mode == "file" and isinstance(output, str) and Path(output).expanduser().resolve() == Path(source).resolve():
                 raise ValueError("Input and output must be different files")
-            self.set_output(output)
-            self.mode, self.model_name, self.lines, self.error = mode, model, 0, ""
-            self.language = language
-            self.live_chunk_seconds = live_chunk_seconds
-            self.recent_lines.clear()
-            self.captured_seconds, self.processed_seconds = 0.0, 0.0
-            self.processing_speed = None
-            if self.warm_model_name != model:
-                self.warm_model = self.warm_model_name = None
-            self.model_phase = None if self.warm_model is not None else "checking"
-            self.model_load_started = time.monotonic() if self.model_phase else None
-            self.model_download_started = None
-            self.model_download_bytes = self.model_download_total = 0
-            self.model_download_eta_seconds = None
-            self.recent_chunks.clear()
-            self.audio_detected = False
-            self.stop_event = threading.Event()
-            self.state = "loading"
-            threading.Thread(target=self._run, args=(mode, source, model, self.stop_event,
+            stop = self._prepare_session_locked(mode, output, model, live_chunk_seconds, language,
+                                                "live" if mode == "live" else "file", "loading")
+            threading.Thread(target=self._run, args=(mode, source, model, stop,
                                                      remove_source, live_chunk_seconds, language), daemon=True).start()
+
+    def start_youtube(self, url: str, output: str | None, model: str,
+                      language: str | None = None) -> None:
+        canonical_url = normalize_youtube_url(url)
+        if model not in MODELS:
+            raise ValueError("Unknown model")
+        if language not in (None, "de", "en"):
+            raise ValueError("Language must be de or en")
+        with self.lock:
+            if self.state in ("loading", "capturing", "running", "stopping", "uploading", "preloading", "importing"):
+                raise ValueError("A transcription or model load is already in progress")
+            stop = self._prepare_session_locked("file", output, model, FILE_SECONDS,
+                                                language, "youtube", "importing")
+            self.import_phase = "checking_transcript"
+            output_path = self.output
+            threading.Thread(target=self._run_youtube, args=(canonical_url, output_path, model,
+                                                             language, stop), daemon=True).start()
+
+    def _youtube_progress(self, phase: str, done: int, total: int) -> None:
+        with self.lock:
+            self.import_phase = phase
+            self.import_downloaded_bytes = done
+            self.import_total_bytes = total
+
+    def _run_youtube(self, url: str, output: str, model: str,
+                     language: str | None, stop: threading.Event) -> None:
+        imported = None
+        handed_off = False
+        completed = False
+        try:
+            imported = import_youtube(url, language, stop, self._youtube_progress)
+            with self.lock:
+                self.source_title = imported.title
+                if stop.is_set():
+                    raise YouTubeImportCancelled("YouTube import cancelled")
+                if imported.captions:
+                    lines = transcript_lines(imported.captions)
+                    if not lines:
+                        raise RuntimeError("The public captions did not contain transcript text")
+                    with open(self.output, "a", encoding="utf-8") as transcript:
+                        transcript.write("\n".join(lines) + "\n")
+                    self.lines = len(lines)
+                    self.recent_lines.extend(lines[-10:])
+                    self.captured_seconds = self.processed_seconds = round(imported.duration, 1)
+                    self.transcript_source = "youtube_captions"
+                    self.transcript_language = imported.caption_language or ""
+                    self.import_phase = None
+                    self.state = "finished"
+                    completed = True
+                    return
+                if imported.audio_path is None or not imported.audio_path.is_file():
+                    raise RuntimeError("YouTube import produced neither full captions nor an audio file")
+                self.state = "idle"
+                self.start("file", str(imported.audio_path), output, model,
+                           remove_source=True, language=language)
+                self.input_source = "youtube"
+                self.source_title = imported.title
+                self.transcript_source = "whisper"
+                self.import_phase = None
+                handed_off = True
+        except YouTubeImportCancelled:
+            pass
+        except Exception as exc:
+            with self.lock:
+                self.error = str(exc)
+                self.state = "error"
+        finally:
+            if imported and imported.audio_path and not handed_off:
+                try:
+                    imported.audio_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if not handed_off:
+                with self.lock:
+                    self.import_phase = None
+                    if self.state != "error":
+                        self.state = "finished" if completed else "stopped" if stop.is_set() else "error"
+                        if self.state == "error" and not self.error:
+                            self.error = "YouTube import ended without a transcript"
 
     def stop(self) -> None:
         with self.lock:
-            if self.state not in ("loading", "capturing", "running", "uploading"):
+            if self.state not in ("loading", "capturing", "running", "uploading", "importing"):
                 return
             self.stop_event.set()
             self.state = "stopping"
@@ -465,7 +574,7 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(path.query)
             output, model = query.get("output", [""])[0], query["model"][0]
             with self.engine.lock:
-                if self.engine.state in ("loading", "capturing", "running", "stopping", "uploading"):
+                if self.engine.state in ("loading", "capturing", "running", "stopping", "uploading", "importing"):
                     raise ValueError("A transcription is already in progress")
                 if model not in MODELS:
                     raise ValueError("Unknown model")

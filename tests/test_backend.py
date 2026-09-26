@@ -29,6 +29,16 @@ class BackendTests(unittest.TestCase):
                 engine.start.assert_called_once_with('file', str(source), str(output), 'tiny')
                 self.assertTrue(source.exists())
 
+    def test_desktop_youtube_import_command(self):
+        with patch.object(backend, 'Transcriber') as mocked:
+            engine = mocked.return_value
+            backend.handle(engine, {'command': 'start_youtube',
+                                   'url': 'https://youtu.be/mjQlZrteMIY',
+                                   'output': '/tmp/transcript.txt', 'model': 'base',
+                                   'language': 'en'})
+            engine.start_youtube.assert_called_once_with(
+                'https://youtu.be/mjQlZrteMIY', '/tmp/transcript.txt', 'base', language='en')
+
     def test_preload_model_command(self):
         with patch.object(backend, 'Transcriber') as mocked:
             engine = mocked.return_value

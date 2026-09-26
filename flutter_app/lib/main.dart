@@ -66,6 +66,7 @@ class TranscriptionScreen extends StatefulWidget {
 
 class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final _output = TextEditingController();
+  final _youtubeUrl = TextEditingController();
   Timer? _poller;
   Map<String, dynamic> _status = const {
     'state': 'idle',
@@ -99,6 +100,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   void dispose() {
     _poller?.cancel();
     _output.dispose();
+    _youtubeUrl.dispose();
     unawaited(widget.client.close());
     super.dispose();
   }
@@ -137,6 +139,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
   bool get _busy => [
     'uploading',
+    'importing',
     'preloading',
     'loading',
     'capturing',
@@ -236,6 +239,29 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final downloadTotal = _status['model_download_total'] as num? ?? 0;
     final downloadEta = _status['model_download_eta_seconds'] as num?;
     final loadElapsed = _status['model_load_elapsed_seconds'] as num? ?? 0;
+    final importPhase = _status['import_phase'] as String?;
+    final importDone = _status['import_downloaded_bytes'] as num? ?? 0;
+    final importTotal = _status['import_total_bytes'] as num? ?? 0;
+    final captionLanguage = (_status['transcript_language'] as String? ?? '')
+        .replaceFirst(RegExp(r'-orig$'), '');
+    final captionLanguageText = captionLanguage.isEmpty
+        ? ''
+        : ' ($captionLanguage)';
+    final youtubeImportInProgress =
+        _status['input_source'] == 'youtube' &&
+        _status['transcript_source'] != 'whisper' &&
+        (state == 'importing' || state == 'stopping');
+    final importText = importPhase == 'checking_transcript'
+        ? 'Checking for a full public transcript before downloading audio…'
+        : importPhase == 'using_captions'
+        ? 'Using public captions; Whisper transcription skipped.'
+        : importPhase == 'downloading_audio' && importTotal > 0
+        ? 'No full public transcript found · downloading audio ${(100 * importDone / importTotal).clamp(0, 100).toStringAsFixed(0)}% · ${(importDone / 1048576).toStringAsFixed(1)} / ${(importTotal / 1048576).toStringAsFixed(1)} MiB'
+        : importPhase == 'downloading_audio'
+        ? 'No full public transcript found · downloading audio…'
+        : importPhase == 'preparing_audio'
+        ? 'Audio downloaded · starting local Whisper transcription…'
+        : 'Importing YouTube video…';
     final downloadText = downloadTotal > 0
         ? 'Model download: ${(100 * downloadDone / downloadTotal).clamp(0, 100).toStringAsFixed(0)}% · '
               '${(downloadDone / 1048576).toStringAsFixed(0)} / ${(downloadTotal / 1048576).toStringAsFixed(0)} MiB'
@@ -259,24 +285,32 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         : etaSeconds < 60
         ? '   ·   ~${etaSeconds}s remaining'
         : '   ·   ~${(etaSeconds / 60).ceil()} min remaining';
-    final speedLabel = switch (modelPhase) {
-      'downloading' => downloadText,
-      'initializing' =>
-        'Initializing model · ${loadElapsed}s elapsed · ETA unknown on first load',
-      'checking' =>
-        'Checking model cache · ${loadElapsed}s elapsed; download ETA not available yet',
-      _
-          when speed == null &&
-              (state == 'running' || state == 'stopping') &&
-              _status['audio_detected'] == true =>
-        'Model ready · waiting for first processed speech chunk',
-      _ when speed == null && (state == 'running' || state == 'stopping') =>
-        'Model ready · waiting for speech',
-      _ when speed == null =>
-        'Transcription speed: available after speech is processed',
-      _ =>
-        '${speed.toStringAsFixed(2)}× real time   ·   ${backlog.toStringAsFixed(1)}s audio waiting$etaText',
-    };
+    final speedLabel = state == 'importing'
+        ? importText
+        : youtubeImportInProgress
+        ? 'Stopping YouTube import…'
+        : _status['transcript_source'] == 'youtube_captions'
+        ? 'Completed from public captions$captionLanguageText · Whisper was skipped'
+        : switch (modelPhase) {
+            'downloading' => downloadText,
+            'initializing' =>
+              'Initializing model · ${loadElapsed}s elapsed · ETA unknown on first load',
+            'checking' =>
+              'Checking model cache · ${loadElapsed}s elapsed; download ETA not available yet',
+            _
+                when speed == null &&
+                    (state == 'running' || state == 'stopping') &&
+                    _status['audio_detected'] == true =>
+              'Model ready · waiting for first processed speech chunk',
+            _
+                when speed == null &&
+                    (state == 'running' || state == 'stopping') =>
+              'Model ready · waiting for speech',
+            _ when speed == null =>
+              'Transcription speed: available after speech is processed',
+            _ =>
+              '${speed.toStringAsFixed(2)}× real time   ·   ${backlog.toStringAsFixed(1)}s audio waiting$etaText',
+          };
     final recentLines = (_status['recent_lines'] as List? ?? const [])
         .cast<String>()
         .reversed
@@ -296,8 +330,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
             ? 'Capturing · model ready'
             : 'Capturing · ${modelPhase == 'downloading' ? 'downloading model' : 'loading model'}',
       'running' => 'Running · ${_status['mode']}',
-      'stopping' => 'Finishing buffered audio',
+      'stopping' =>
+        youtubeImportInProgress
+            ? 'Stopping YouTube import'
+            : 'Finishing buffered audio',
       'loading' => 'Starting',
+      'importing' => 'Importing YouTube video',
       'preloading' => 'Pre-loading · ${_status['model']} model',
       'idle' when modelReady => 'Ready · $_model model warmed',
       'error' => 'Error',
@@ -360,6 +398,14 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     Text(
                       state == 'preloading'
                           ? 'Preparing the model before capture; no audio is being recorded yet.'
+                          : state == 'importing'
+                          ? importText
+                          : youtubeImportInProgress
+                          ? 'Stopping YouTube import…'
+                          : _status['input_source'] == 'youtube' &&
+                                _status['transcript_source'] ==
+                                    'youtube_captions'
+                          ? '$lines transcript lines · full public captions$captionLanguageText used · Whisper skipped'
                           : '$lines transcript lines  ·  ${captured}s captured  ·  ${_status['audio_detected'] == true ? 'Audio detected' : 'Waiting for audio'}',
                       style: Theme.of(context).textTheme.bodyLarge,
                     ),
@@ -370,6 +416,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                           : 'Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)',
                       style: const TextStyle(color: Color(0xffadb8ca)),
                     ),
+                    if (_status['input_source'] == 'youtube' &&
+                        (_status['source_title'] as String? ?? '').isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'YouTube · ${_status['source_title']}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                     const Divider(height: 30),
                     Text(
                       speedLabel,
@@ -481,6 +537,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ),
                     const SizedBox(height: 16),
                     TextField(
+                      key: const Key('output-path-field'),
                       controller: _output,
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
@@ -709,6 +766,57 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                             }),
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('Transcribe file'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'YouTube video',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Checks for a complete public caption track first. If found, it is used directly; otherwise the audio is downloaded and transcribed locally.',
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      key: const Key('youtube-url-field'),
+                      controller: _youtubeUrl,
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(
+                        labelText: 'YouTube video URL',
+                        hintText: 'https://www.youtube.com/watch?v=…',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed:
+                          _busy ||
+                              _pending ||
+                              _youtubeUrl.text.trim().isEmpty ||
+                              !_languageReady
+                          ? null
+                          : () => _command('start_youtube', {
+                              'url': _youtubeUrl.text.trim(),
+                              'model': _model,
+                              'language': _language,
+                              'output': _output.text,
+                            }),
+                      icon: const Icon(Icons.subtitles_outlined),
+                      label: const Text('Check captions & transcribe'),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Requires internet access. Use videos you are authorized to process; downloads are subject to YouTube availability and terms.',
+                      style: TextStyle(color: Color(0xffadb8ca)),
                     ),
                   ],
                 ),

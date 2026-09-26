@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class FakeBackend implements TranscriptionClient {
   final commands = <String>[];
   Map<String, dynamic>? lastLiveArgs;
+  Map<String, dynamic>? lastYoutubeArgs;
   int sessions = 0;
   Map<String, dynamic> status = {
     'state': 'idle',
@@ -54,6 +55,16 @@ class FakeBackend implements TranscriptionClient {
         'live_chunk_seconds': args['chunk_seconds'],
       };
     }
+    if (command == 'start_youtube') {
+      lastYoutubeArgs = args;
+      status = {
+        ...status,
+        'state': 'importing',
+        'mode': 'file',
+        'input_source': 'youtube',
+        'import_phase': 'checking_transcript',
+      };
+    }
     if (command == 'stop') status = {...status, 'state': 'stopped'};
     if (command == 'output') status = {...status, 'output': args['output']};
     return status;
@@ -78,7 +89,7 @@ void main() {
       find.text('Automatic output: ~/YYYY-MM-DD_HH-MM (chosen at start)'),
       findsOneWidget,
     );
-    final field = find.byType(TextField);
+    final field = find.byKey(const Key('output-path-field'));
     await tester.enterText(field, '/tmp/transcript.txt');
     await tester.pump();
     await tester.ensureVisible(find.text('Start live transcription'));
@@ -94,6 +105,26 @@ void main() {
     await tester.tap(find.text('Stop'));
     await tester.pump();
     expect(backend.commands, contains('stop'));
+  });
+
+  testWidgets('imports a YouTube URL and starts captions-first transcription', (
+    tester,
+  ) async {
+    final backend = FakeBackend();
+    await tester.pumpWidget(LiveWhisperApp(client: backend));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+    final field = find.byKey(const Key('youtube-url-field'));
+    await tester.ensureVisible(field);
+    await tester.enterText(field, 'https://youtu.be/mjQlZrteMIY');
+    await tester.pump();
+    await tester.ensureVisible(find.text('Check captions & transcribe'));
+    await tester.tap(find.text('Check captions & transcribe'));
+    await tester.pump();
+    expect(backend.commands, contains('start_youtube'));
+    expect(backend.lastYoutubeArgs?['url'], 'https://youtu.be/mjQlZrteMIY');
+    expect(backend.lastYoutubeArgs?['language'], 'de');
+    expect(find.text('Importing YouTube video'), findsOneWidget);
   });
 
   testWidgets('pre-load button warms selected model before capture', (
@@ -151,7 +182,7 @@ void main() {
       final backend = FakeBackend();
       await tester.pumpWidget(LiveWhisperApp(client: backend));
       await tester.pump();
-      final output = find.byType(TextField);
+      final output = find.byKey(const Key('output-path-field'));
       await tester.ensureVisible(find.text('Start live transcription'));
       await tester.pump();
       await tester.tap(find.text('Start live transcription'));
@@ -228,7 +259,10 @@ void main() {
     final backend = FakeBackend();
     await tester.pumpWidget(LiveWhisperApp(client: backend));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), '/tmp/transcript.txt');
+    await tester.enterText(
+      find.byKey(const Key('output-path-field')),
+      '/tmp/transcript.txt',
+    );
     await tester.ensureVisible(find.text('Start live transcription'));
     await tester.pump();
     await tester.ensureVisible(find.text('Low latency · 4s'));
