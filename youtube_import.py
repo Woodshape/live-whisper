@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+LANGUAGE_CODE = re.compile(r"^[a-z]{2,3}$")
 TIMESTAMP = re.compile(r"^(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{1,3})$")
 MAX_VIDEO_SECONDS = 4 * 60 * 60
 MAX_AUDIO_BYTES = 2 * 1024**3
@@ -31,6 +32,7 @@ class YouTubeImport:
     duration: float
     captions: tuple[CaptionCue, ...] = ()
     caption_language: str | None = None
+    spoken_language: str | None = None
     audio_path: Path | None = None
 
 
@@ -77,6 +79,15 @@ def _seconds(value: str) -> float | None:
     hours, minutes, seconds, millis = match.groups()
     fraction = int(millis.ljust(3, "0")) / 1000
     return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + fraction
+
+
+def video_language(info: dict) -> str | None:
+    """Return the video's spoken language as a bare code (``en`` from ``en-US``)."""
+    value = info.get("language")
+    if not isinstance(value, str):
+        return None
+    code = value.strip().lower().replace("_", "-").split("-", 1)[0]
+    return code if LANGUAGE_CODE.fullmatch(code) else None
 
 
 def parse_captions(content: str, extension: str = "vtt") -> tuple[CaptionCue, ...]:
@@ -131,36 +142,39 @@ def _language_base(language: str) -> str:
 
 
 def choose_caption_track(info: dict, preferred_language: str | None) -> tuple[str, dict] | None:
-    """Prefer captions for the video's spoken language, then user's selected language."""
+    """Pick a manual caption track for the video's spoken language, if one exists.
+
+    YouTube's automatic captions are rolling windows that repeat each previous cue, so
+    they arrive heavily duplicated; without a manual track the app downloads the audio
+    and transcribes it locally instead.
+    """
     original = info.get("language")
     original_base = _language_base(original) if isinstance(original, str) and original else None
     preferred_base = _language_base(preferred_language) if preferred_language else None
-    candidates: list[tuple[tuple[int, int, int, int], str, dict]] = []
-    for source_rank, source in enumerate(("subtitles", "automatic_captions")):
-        tracks = info.get(source) or {}
-        if not isinstance(tracks, dict):
+    tracks = info.get("subtitles") or {}
+    if not isinstance(tracks, dict):
+        return None
+    candidates: list[tuple[tuple[int, int], str, dict]] = []
+    for language, formats in tracks.items():
+        if not isinstance(language, str) or not isinstance(formats, list):
             continue
-        for language, formats in tracks.items():
-            if not isinstance(language, str) or not isinstance(formats, list):
-                continue
-            formats = [item for item in formats if isinstance(item, dict)]
-            base = _language_base(language)
-            if original_base and base == original_base:
-                language_rank = 0
-            elif preferred_base and base == preferred_base:
-                language_rank = 1 if original_base else 0
-            elif base == "en":
-                language_rank = 2
-            else:
-                language_rank = 3
-            is_original_track = language.lower().endswith("-orig")
-            format_entry = next((item for item in formats if item.get("ext") == "vtt"), None)
-            if format_entry is None:
-                format_entry = next((item for item in formats if item.get("ext") == "srt"), None)
-            if format_entry is None or not format_entry.get("url"):
-                continue
-            rank = (language_rank, source_rank, 0 if is_original_track else 1, 0 if format_entry.get("ext") == "vtt" else 1)
-            candidates.append((rank, language, format_entry))
+        formats = [item for item in formats if isinstance(item, dict)]
+        base = _language_base(language)
+        if original_base and base == original_base:
+            language_rank = 0
+        elif preferred_base and base == preferred_base:
+            language_rank = 1 if original_base else 0
+        elif base == "en":
+            language_rank = 2
+        else:
+            language_rank = 3
+        format_entry = next((item for item in formats if item.get("ext") == "vtt"), None)
+        if format_entry is None:
+            format_entry = next((item for item in formats if item.get("ext") == "srt"), None)
+        if format_entry is None or not format_entry.get("url"):
+            continue
+        rank = (language_rank, 0 if format_entry.get("ext") == "vtt" else 1)
+        candidates.append((rank, language, format_entry))
     if not candidates:
         return None
     _, language, entry = min(candidates, key=lambda candidate: candidate[0])
@@ -173,7 +187,7 @@ def import_youtube(
     stop_event: threading.Event,
     progress,
 ) -> YouTubeImport:
-    """Use a complete public caption track when possible; otherwise fetch audio."""
+    """Use a complete manual caption track when one exists; otherwise fetch the audio."""
     canonical_url = normalize_youtube_url(url)
     video_id = canonical_url.rsplit("=", 1)[-1]
     try:
@@ -224,6 +238,7 @@ def import_youtube(
             if duration > MAX_VIDEO_SECONDS:
                 raise ValueError("YouTube videos longer than four hours are not supported")
             title = str(info.get("title") or video_id)
+            spoken_language = video_language(info)
 
             track = choose_caption_track(info, language)
             if track:
@@ -245,7 +260,8 @@ def import_youtube(
                     captions = parse_captions(data.decode("utf-8-sig", errors="replace"), caption_format.get("ext", "vtt"))
                     if is_full_transcript(captions, duration):
                         progress("using_captions", 0, 0)
-                        return YouTubeImport(title, duration, captions, caption_language)
+                        return YouTubeImport(title, duration, captions, caption_language,
+                                             spoken_language=spoken_language)
                 except YouTubeImportCancelled:
                     raise
                 except Exception:
@@ -276,7 +292,8 @@ def import_youtube(
                 raise ValueError("YouTube audio exceeds the 2 GiB download limit")
             progress("preparing_audio", audio_path.stat().st_size, audio_path.stat().st_size)
             keep_audio = True
-            return YouTubeImport(title, duration, audio_path=audio_path)
+            return YouTubeImport(title, duration, audio_path=audio_path,
+                                 spoken_language=spoken_language)
     except YouTubeImportCancelled:
         raise
     except Exception:

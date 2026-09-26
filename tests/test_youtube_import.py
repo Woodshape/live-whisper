@@ -7,6 +7,7 @@ from youtube_import import (
     normalize_youtube_url,
     parse_captions,
     transcript_lines,
+    video_language,
 )
 
 
@@ -49,6 +50,16 @@ class YouTubeImportTests(unittest.TestCase):
             ["[00:00:00] Hello & welcome.", "[00:00:30] Second line"],
         )
 
+    def test_normalizes_the_video_spoken_language_to_a_bare_model_code(self):
+        self.assertEqual(video_language({"language": "en-US"}), "en")
+        self.assertEqual(video_language({"language": "DE"}), "de")
+        self.assertEqual(video_language({"language": "zh-Hant"}), "zh")
+        self.assertEqual(video_language({"language": "pt_BR"}), "pt")
+        self.assertEqual(video_language({"language": "haw"}), "haw")
+        for info in ({}, {"language": None}, {"language": ""}, {"language": 7}, {"language": "english"}):
+            with self.subTest(info=info):
+                self.assertIsNone(video_language(info))
+
     def test_only_treats_near_full_caption_tracks_as_complete(self):
         complete = (CaptionCue(0, 5, "start"), CaptionCue(95, 100, "end"))
         partial = (CaptionCue(0, 5, "start"), CaptionCue(70, 75, "partial"))
@@ -56,18 +67,25 @@ class YouTubeImportTests(unittest.TestCase):
         self.assertFalse(is_full_transcript(partial, 100))
         self.assertFalse(is_full_transcript(complete, 0))
 
-    def test_selects_original_spoken_language_caption_over_translation(self):
+    def test_selects_the_videos_spoken_language_over_a_manual_translation(self):
         info = {
             "language": "en-US",
-            "subtitles": {},
-            "automatic_captions": {
+            "subtitles": {
                 "de": [{"ext": "vtt", "url": "https://captions.invalid/de"}],
-                "en-orig": [{"ext": "vtt", "url": "https://captions.invalid/en"}],
+                "en": [{"ext": "vtt", "url": "https://captions.invalid/en"}],
             },
         }
         language, track = choose_caption_track(info, "de")
-        self.assertEqual(language, "en-orig")
+        self.assertEqual(language, "en")
         self.assertEqual(track["url"], "https://captions.invalid/en")
+
+    def test_ignores_automatic_captions_so_the_audio_path_transcribes_locally(self):
+        info = {
+            "language": "en-US",
+            "subtitles": {},
+            "automatic_captions": {"en-orig": [{"ext": "vtt", "url": "https://captions.invalid/en"}]},
+        }
+        self.assertIsNone(choose_caption_track(info, "en"))
 
     def test_prefers_manual_captions_when_the_language_matches(self):
         info = {

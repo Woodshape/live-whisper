@@ -140,6 +140,35 @@ class TranscriberTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertIn("hello world", output.read_text())
 
+    def test_youtube_audio_fallback_prefers_the_video_language_over_the_user_selection(self):
+        options_seen = []
+        class RecordingModel:
+            def transcribe(self, audio, **kwargs):
+                options_seen.append(kwargs.get("language"))
+                return iter([type("Segment", (), {"text": " speech"})()]), None
+
+        cases = (("en", "de", "en"), ("es", "de", "es"), (None, "de", "de"), ("xx", "de", "de"))
+        with tempfile.TemporaryDirectory() as directory:
+            engine = app.Transcriber()
+            with patch.object(app, "load_model", return_value=RecordingModel()):
+                for spoken_language, selected, expected in cases:
+                    source = Path(directory) / f"audio-{spoken_language}.wav"
+                    with wave.open(str(source), "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(app.RATE)
+                        wav.writeframes(b"\xff\x3f" * app.RATE)
+                    imported = YouTubeImport("Example video", 1, audio_path=source,
+                                             spoken_language=spoken_language)
+                    with patch.object(app, "import_youtube", return_value=imported):
+                        engine.start_youtube("https://youtu.be/mjQlZrteMIY",
+                                             str(Path(directory) / "out.txt"), "tiny", selected)
+                        status = wait_for(engine)
+                    with self.subTest(spoken_language=spoken_language, selected=selected):
+                        self.assertEqual(status["state"], "finished")
+                        self.assertEqual(status["language"], expected)
+                        self.assertEqual(options_seen[-1], expected)
+
     def test_stop_during_youtube_import_waits_for_import_worker_and_cancels(self):
         entered, release = threading.Event(), threading.Event()
 

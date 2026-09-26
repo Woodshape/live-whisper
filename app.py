@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import platform
@@ -31,6 +32,29 @@ MAX_UPLOAD = 4 * 1024**3
 def default_output_path() -> str:
     # Local wall-clock time when the transcription starts; minute precision by design.
     return str(Path.home() / datetime.now().strftime("%Y-%m-%d_%H-%M"))
+
+
+@functools.lru_cache(maxsize=1)
+def whisper_languages() -> frozenset[str]:
+    """Spoken-language codes the bundled faster-whisper build accepts.
+
+    Mirrors faster-whisper's private constant so validation needs no model load;
+    ``WhisperModel.supported_languages`` remains the runtime source of truth.
+    """
+    from faster_whisper.tokenizer import _LANGUAGE_CODES
+
+    return frozenset(_LANGUAGE_CODES)
+
+
+def resolve_youtube_language(video_language: str | None, selected: str | None) -> str | None:
+    """Use the video's own spoken language, falling back to the user's selection.
+
+    The desktop language choice describes live capture; forcing it onto a video in
+    another language makes Whisper translate that audio instead of transcribing it.
+    """
+    if video_language is not None and video_language in whisper_languages():
+        return video_language
+    return selected
 
 
 def devices() -> list[dict[str, str]]:
@@ -262,14 +286,22 @@ class Transcriber:
     def start(self, mode: str, source: str, output: str | None, model: str,
               remove_source: bool = False, live_chunk_seconds: int | None = None,
               language: str | None = None) -> None:
+        # Live capture and file import carry no language metadata, so the user's
+        # selection is the only signal; the desktop client offers only these codes.
+        if language not in (None, "de", "en"):
+            raise ValueError("Language must be de or en")
+        self._start(mode, source, output, model, remove_source, live_chunk_seconds, language)
+
+    def _start(self, mode: str, source: str, output: str | None, model: str,
+               remove_source: bool = False, live_chunk_seconds: int | None = None,
+               language: str | None = None) -> None:
+        """Start a session. ``language`` must already be validated by the caller."""
         if live_chunk_seconds is None:
             live_chunk_seconds = LIVE_SECONDS
         if type(live_chunk_seconds) is not int or live_chunk_seconds not in LIVE_CHUNK_PRESETS:
             raise ValueError("Live chunk length must be 4 or 8 seconds")
         if model not in MODELS:
             raise ValueError("Unknown model")
-        if language not in (None, "de", "en"):
-            raise ValueError("Language must be de or en")
         if mode not in ("live", "file"):
             raise ValueError("Unknown mode")
         if not source:
@@ -340,8 +372,10 @@ class Transcriber:
                 if imported.audio_path is None or not imported.audio_path.is_file():
                     raise RuntimeError("YouTube import produced neither full captions nor an audio file")
                 self.state = "idle"
-                self.start("file", str(imported.audio_path), output, model,
-                           remove_source=True, language=language)
+                # The video's own language beats the live-capture selection, which
+                # would otherwise make Whisper translate instead of transcribe it.
+                self._start("file", str(imported.audio_path), output, model, remove_source=True,
+                            language=resolve_youtube_language(imported.spoken_language, language))
                 self.input_source = "youtube"
                 self.source_title = imported.title
                 self.transcript_source = "whisper"
